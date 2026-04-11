@@ -4,66 +4,8 @@ import * as os from 'os'
 import * as vscode from 'vscode'
 import { execFileSync } from 'child_process'
 import { AuthData } from '../types'
+import { loadAuthDataFromJson } from './auth-parser'
 import { errorLog } from '../utils/log'
-
-function asNonEmptyString(value: unknown): string | undefined {
-  if (typeof value !== 'string') {
-    return undefined
-  }
-  const v = value.trim()
-  return v ? v : undefined
-}
-
-function getDefaultOrganization(authPayload: any): {
-  id?: string
-  title?: string
-} {
-  const directId =
-    asNonEmptyString(authPayload?.selected_organization_id) ||
-    asNonEmptyString(authPayload?.default_organization_id)
-
-  const organizations = Array.isArray(authPayload?.organizations)
-    ? authPayload.organizations
-    : []
-
-  if (directId) {
-    const match = organizations.find(
-      (org: any) => asNonEmptyString(org?.id) === directId,
-    )
-    return {
-      id: directId,
-      title: asNonEmptyString(match?.title),
-    }
-  }
-
-  if (organizations.length === 0) {
-    return {}
-  }
-
-  const selected =
-    organizations.find((org: any) => org?.is_default) || organizations[0]
-  return {
-    id: asNonEmptyString(selected?.id),
-    title: asNonEmptyString(selected?.title),
-  }
-}
-
-/**
- * Parse JWT token to extract payload
- */
-function parseJWT(token: string): any {
-  try {
-    const parts = token.split('.')
-    if (parts.length !== 3) {
-      throw new Error('Invalid JWT')
-    }
-    const payload = Buffer.from(parts[1], 'base64url').toString()
-    return JSON.parse(payload)
-  } catch (error) {
-    errorLog('Error parsing JWT:', error)
-    return {}
-  }
-}
 
 /**
  * Resolve default Codex home path.
@@ -120,30 +62,7 @@ export async function loadAuthDataFromFile(
 
     const authContent = fs.readFileSync(authPath, 'utf8')
     const authJson = JSON.parse(authContent)
-
-    if (!authJson.tokens) {
-      return null
-    }
-
-    // Parse ID token to get user info
-    const idTokenPayload = parseJWT(authJson.tokens.id_token)
-    const authPayload = idTokenPayload['https://api.openai.com/auth']
-    const defaultOrganization = getDefaultOrganization(authPayload)
-
-    return {
-      idToken: authJson.tokens.id_token,
-      accessToken: authJson.tokens.access_token,
-      refreshToken: authJson.tokens.refresh_token,
-      accountId: authJson.tokens.account_id,
-      defaultOrganizationId: defaultOrganization.id,
-      defaultOrganizationTitle: defaultOrganization.title,
-      chatgptUserId: asNonEmptyString(authPayload?.chatgpt_user_id),
-      userId: asNonEmptyString(authPayload?.user_id),
-      subject: asNonEmptyString(idTokenPayload.sub),
-      email: idTokenPayload.email || 'Unknown',
-      planType: authPayload?.chatgpt_plan_type || 'Unknown',
-      authJson,
-    }
+    return loadAuthDataFromJson(authJson)
   } catch (error) {
     errorLog('Error reading auth file:', error)
     return null

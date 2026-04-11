@@ -19,5 +19,6 @@
   "command.profile.rename.title": "Codex Switch: Переименовать профиль",
   "command.profile.delete.title": "Codex Switch: Удалить профиль",
   "command.profile.exportSettings.title": "Codex Switch: Экспорт профилей",
-  "command.profile.importSettings.title": "Codex Switch: Импорт профилей"
+  "command.profile.importSettings.title": "Codex Switch: Импорт профилей",
+  "command.profile.expandAll.title": "Codex Switch: Expand All Profiles"
 }

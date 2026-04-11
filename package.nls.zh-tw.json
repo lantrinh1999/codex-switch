@@ -18,5 +18,6 @@
   "configuration.statusBarClickBehavior.cycle": "循環切換所有已儲存的設定檔",
   "configuration.statusBarClickBehavior.toggleLast": "在目前與上一個設定檔之間切換",
   "command.profile.exportSettings.title": "Codex Switch: 匯出設定檔",
-  "command.profile.importSettings.title": "Codex Switch: 匯入設定檔"
+  "command.profile.importSettings.title": "Codex Switch: 匯入設定檔",
+  "command.profile.expandAll.title": "Codex Switch: Expand All Profiles"
 }

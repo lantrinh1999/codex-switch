@@ -29,10 +29,16 @@ and keep profile state consistent across clients.
 ## How Switching Works
 
 The status bar shows the current active profile.
-Click behavior is configurable:
+Switch behavior is configurable:
 
 * `cycle`: switch through all saved profiles in order.
 * `toggleLast`: switch between current and previous profile.
+* `bestQuota`: switch to the saved profile with the highest remaining quota.
+
+Trigger behavior is also configurable:
+
+* `click`: switch on a single click.
+* `doubleClick`: switch only after a double-click.
 
 After a successful switch,
 Codex Switch writes the chosen auth data into the active auth file,
@@ -109,7 +115,11 @@ Main settings:
 * `codexSwitch.activeProfileScope` (`global` or `workspace`)
 * `codexSwitch.storageMode` (`auto`, `secretStorage`, `remoteFiles`)
 * `codexSwitch.reloadWindowAfterProfileSwitch`
-* `codexSwitch.statusBarClickBehavior` (`cycle` or `toggleLast`)
+* `codexSwitch.statusBarClickBehavior` (`cycle`, `toggleLast`, or `bestQuota`)
+* `codexSwitch.statusBarSwitchTrigger` (`click` or `doubleClick`)
+
+The profiles sidebar starts collapsed by default and keeps your expand/collapse
+state while health data refreshes.
 
 ## Security Notes
 

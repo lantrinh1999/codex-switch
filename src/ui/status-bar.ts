@@ -1,5 +1,6 @@
 import * as vscode from 'vscode'
-import { ProfileSummary } from '../types'
+import { ProfileHealthState, ProfileSummary } from '../types'
+import { formatQuotaSummary } from '../health/profile-health'
 import { createProfileTooltip } from './tooltip-builder'
 
 let statusBarItem: vscode.StatusBarItem
@@ -20,6 +21,7 @@ export function createStatusBarItem(): vscode.StatusBarItem {
 export function updateProfileStatus(
   profile: ProfileSummary | null,
   profiles: ProfileSummary[],
+  healthState?: ProfileHealthState,
 ) {
   if (!statusBarItem) {
     return
@@ -34,12 +36,15 @@ export function updateProfileStatus(
     return
   }
 
-  statusBarItem.text = `$(account) ${vscode.l10n.t('Codex: {0}', profile.name)}`
+  const quotaSummary = formatQuotaSummary(healthState?.quotaInfo || null)
+  statusBarItem.text = quotaSummary
+    ? `$(account) ${vscode.l10n.t('Codex: {0}', profile.name)} · ${quotaSummary}`
+    : `$(account) ${vscode.l10n.t('Codex: {0}', profile.name)}`
   // If there is nothing meaningful to switch to, go straight to Manage.
   statusBarItem.command =
     cachedProfiles.length <= 1
       ? 'codex-switch.profile.manage'
-      : 'codex-switch.profile.toggleLast'
+      : 'codex-switch.profile.statusBarAction'
   statusBarItem.tooltip = createProfileTooltip(profile, cachedProfiles)
 }
 

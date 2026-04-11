@@ -18,5 +18,6 @@
   "configuration.statusBarClickBehavior.cycle": "Alle gespeicherten Profile zyklisch wechseln",
   "configuration.statusBarClickBehavior.toggleLast": "Zwischen aktuellem und vorherigem Profil wechseln",
   "command.profile.exportSettings.title": "Codex Switch: Profile exportieren",
-  "command.profile.importSettings.title": "Codex Switch: Profile importieren"
+  "command.profile.importSettings.title": "Codex Switch: Profile importieren",
+  "command.profile.expandAll.title": "Codex Switch: Expand All Profiles"
 }

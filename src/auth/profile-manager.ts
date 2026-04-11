@@ -746,6 +746,30 @@ export class ProfileManager {
     return true
   }
 
+  async updateStoredProfileAuth(
+    profileId: string,
+    authData: AuthData,
+    options?: { syncIfActive?: boolean },
+  ): Promise<boolean> {
+    const updated = await this.replaceProfileAuth(profileId, authData)
+    if (!updated) {
+      return false
+    }
+
+    if (!options?.syncIfActive) {
+      return true
+    }
+
+    const activeProfileId = await this.getActiveProfileId()
+    if (activeProfileId !== profileId) {
+      return true
+    }
+
+    syncCodexAuthFile(getDefaultCodexAuthPath(), authData)
+    this.lastSyncedProfileId = profileId
+    return true
+  }
+
   private async maybeSyncToCodexAuthFile(profileId: string): Promise<void> {
     if (!profileId) {
       return

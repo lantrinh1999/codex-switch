@@ -18,5 +18,6 @@
   "configuration.statusBarClickBehavior.cycle": "保存済みプロファイルを順番に切り替える",
   "configuration.statusBarClickBehavior.toggleLast": "現在のプロファイルと前回のプロファイルを切り替える",
   "command.profile.exportSettings.title": "Codex Switch: プロファイルをエクスポート",
-  "command.profile.importSettings.title": "Codex Switch: プロファイルをインポート"
+  "command.profile.importSettings.title": "Codex Switch: プロファイルをインポート",
+  "command.profile.expandAll.title": "Codex Switch: Expand All Profiles"
 }
