@@ -6,6 +6,26 @@ import {
   getQuotaWindowLabel,
 } from '../health/profile-health'
 
+function getLastRenewedLabel(
+  healthState: ProfileHealthState | undefined,
+): string | undefined {
+  if (!healthState) {
+    return undefined
+  }
+
+  if (healthState.tokenRefreshInProgress) {
+    return vscode.l10n.t('Renewing')
+  }
+
+  if (healthState.lastRenewedAt) {
+    return healthState.lastRenewedAt
+  }
+
+  return healthState.refreshTokenStatus.available
+    ? vscode.l10n.t('Never')
+    : vscode.l10n.t('Unavailable')
+}
+
 function quotaIcon(window: QuotaWindowInfo): vscode.ThemeIcon {
   if (window.remainingPercent === 0) {
     return new vscode.ThemeIcon(
@@ -45,6 +65,13 @@ function buildRootDescription(
   profile: ProfileSummary,
   healthState: ProfileHealthState | undefined,
 ): string | undefined {
+  if (healthState?.tokenRefreshInProgress) {
+    return vscode.l10n.t('Renewing token')
+  }
+
+  // Keep collapsed rows stable even after a failed renewal attempt. The
+  // failure remains visible in the tooltip and expanded detail rows, while the
+  // root row continues to show the usual quota/token summary the user expects.
   const quotaSummary = formatQuotaSummary(healthState?.quotaInfo || null)
   if (quotaSummary) {
     return quotaSummary
@@ -55,9 +82,7 @@ function buildRootDescription(
     parts.push(profile.planType)
   }
 
-  if (healthState?.tokenRefreshInProgress) {
-    parts.push(vscode.l10n.t('Refreshing token'))
-  } else if (healthState?.quotaLoading) {
+  if (healthState?.quotaLoading) {
     parts.push(vscode.l10n.t('Refreshing quota'))
   } else if (healthState?.quotaErrorMessage) {
     parts.push(healthState.quotaErrorMessage)
@@ -102,6 +127,15 @@ function buildRootTooltip(
       healthState?.refreshTokenStatus.label || vscode.l10n.t('missing')
     }`,
   )
+  const lastRenewedLabel = getLastRenewedLabel(healthState)
+  if (lastRenewedLabel) {
+    lines.push(`${vscode.l10n.t('Last renewed')}: ${lastRenewedLabel}`)
+  }
+  if (healthState?.tokenRenewErrorMessage) {
+    lines.push(
+      `${vscode.l10n.t('Token renewal')}: ${healthState.tokenRenewErrorMessage}`,
+    )
+  }
 
   const quotaSummary = formatQuotaSummary(healthState?.quotaInfo || null)
   if (quotaSummary) {
@@ -347,10 +381,10 @@ export class ProfileTreeProvider
     const refreshTokenItem = new ProfileDetailItem(
       vscode.l10n.t('Refresh token'),
       healthState.tokenRefreshInProgress
-        ? vscode.l10n.t('Refreshing')
+        ? vscode.l10n.t('Renewing')
         : healthState.refreshTokenStatus.label,
       healthState.tokenRefreshInProgress
-        ? vscode.l10n.t('Refreshing')
+        ? vscode.l10n.t('Renewing')
         : healthState.refreshTokenStatus.label,
       profile.id,
       parent,
@@ -361,6 +395,41 @@ export class ProfileTreeProvider
         ? new vscode.ThemeIcon('refresh', new vscode.ThemeColor('charts.green'))
         : new vscode.ThemeIcon('circle-slash')
     items.push(refreshTokenItem)
+
+    const lastRenewedLabel = getLastRenewedLabel(healthState)
+    if (lastRenewedLabel) {
+      const lastRenewedItem = new ProfileDetailItem(
+        vscode.l10n.t('Last renewed'),
+        lastRenewedLabel,
+        lastRenewedLabel,
+        profile.id,
+        parent,
+      )
+      lastRenewedItem.iconPath = healthState.tokenRefreshInProgress
+        ? new vscode.ThemeIcon('loading~spin')
+        : lastRenewedLabel === vscode.l10n.t('Unavailable')
+          ? new vscode.ThemeIcon('circle-slash')
+          : new vscode.ThemeIcon(
+              'history',
+              new vscode.ThemeColor('charts.green'),
+            )
+      items.push(lastRenewedItem)
+    }
+
+    if (healthState.tokenRenewErrorMessage) {
+      const renewalErrorItem = new ProfileDetailItem(
+        vscode.l10n.t('Token renewal'),
+        healthState.tokenRenewErrorMessage,
+        healthState.tokenRenewErrorMessage,
+        profile.id,
+        parent,
+      )
+      renewalErrorItem.iconPath = new vscode.ThemeIcon(
+        'warning',
+        new vscode.ThemeColor('errorForeground'),
+      )
+      items.push(renewalErrorItem)
+    }
 
     if (healthState.quotaLoading) {
       const loadingItem = new ProfileDetailItem(

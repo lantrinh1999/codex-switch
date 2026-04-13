@@ -122,3 +122,61 @@ test('profile tree roots start collapsed and preserve expansion state', async ()
     )
   })
 })
+
+test('profile tree shows token renewal details', async () => {
+  const vscodeMock = createVscodeMock()
+
+  await withMockedVscode(vscodeMock, async () => {
+    const { ProfileTreeProvider } = require('../out/ui/profile-tree.js')
+    const provider = new ProfileTreeProvider()
+    const profiles = [
+      {
+        id: 'profile-1',
+        name: 'Work',
+        email: 'work@example.com',
+        planType: 'plus',
+        createdAt: '2026-04-12T00:00:00.000Z',
+        updatedAt: '2026-04-12T00:00:00.000Z',
+      },
+    ]
+
+    provider.setState(
+      profiles,
+      undefined,
+      new Map([
+        [
+          'profile-1',
+          {
+            profileId: 'profile-1',
+            authAvailable: true,
+            tokenStatus: { label: 'expires in 1h', isExpired: false },
+            refreshTokenStatus: { available: true, label: 'available' },
+            lastRenewedAt: '2026-04-12T05:00:00.000Z',
+            tokenRenewErrorMessage: 'Token renewal failed',
+            quotaInfo: null,
+            quotaLoading: false,
+            tokenRefreshInProgress: false,
+            updatedAt: Date.now(),
+          },
+        ],
+      ]),
+    )
+
+    const [root] = provider.getRootItems()
+    assert.equal(root.description, 'plus · expires in 1h')
+    assert.ok(root.tooltip.includes('Token renewal: Token renewal failed'))
+
+    const details = provider.getChildren(root)
+    const byLabel = new Map(details.map((item) => [item.label, item]))
+
+    assert.equal(byLabel.get('Refresh token')?.description, 'available')
+    assert.equal(
+      byLabel.get('Last renewed')?.description,
+      '2026-04-12T05:00:00.000Z',
+    )
+    assert.equal(
+      byLabel.get('Token renewal')?.description,
+      'Token renewal failed',
+    )
+  })
+})

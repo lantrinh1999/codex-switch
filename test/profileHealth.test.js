@@ -5,6 +5,7 @@ const {
   buildAuthPayload,
   fetchQuotaInfo,
   formatQuotaSummary,
+  isTokenRenewDue,
   getTokenStatus,
   pickBestQuotaProfileId,
 } = require('../out/health/profile-health.js')
@@ -152,4 +153,20 @@ test('pickBestQuotaProfileId chooses the highest remaining quota', () => {
 
   assert.equal(pickBestQuotaProfileId(profiles, states), 'c')
   assert.equal(pickBestQuotaProfileId(profiles, states, 'c'), 'c')
+})
+
+test('isTokenRenewDue respects the configured interval and refresh token availability', () => {
+  const now = Date.UTC(2026, 3, 12, 0, 0, 0)
+  const staleAuthData = makeAuthData(now)
+  staleAuthData.authJson.last_refresh = '2026-04-11T20:30:00.000Z'
+
+  const freshAuthData = makeAuthData(now)
+  freshAuthData.authJson.last_refresh = '2026-04-11T23:30:00.000Z'
+
+  const missingRefreshToken = makeAuthData(now)
+  missingRefreshToken.refreshToken = ''
+
+  assert.equal(isTokenRenewDue(staleAuthData, 60, now), true)
+  assert.equal(isTokenRenewDue(freshAuthData, 60, now), false)
+  assert.equal(isTokenRenewDue(missingRefreshToken, 60, now), false)
 })

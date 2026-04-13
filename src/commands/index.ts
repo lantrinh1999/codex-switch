@@ -9,6 +9,7 @@ import {
   shouldUseWslAuthPath,
 } from '../auth/auth-manager'
 import { pickBestQuotaProfileId } from '../health/profile-health'
+import { ProfileSummary } from '../types'
 import { RefreshCoordinator } from '../ui/refresh-coordinator'
 import { ProfileTreeNode, ProfileTreeProvider } from '../ui/profile-tree'
 
@@ -158,19 +159,47 @@ async function afterProfileChange(
   }
 }
 
+function getProfileNotificationName(
+  profile: Pick<ProfileSummary, 'name'> | undefined,
+  fallbackProfileId: string,
+): string {
+  return profile?.name || fallbackProfileId
+}
+
+function showActionInformationMessage(message: string): void {
+  void vscode.window.showInformationMessage(message)
+}
+
+// Only direct user-invoked commands should call these helpers. Internal
+// follow-up refreshes triggered as part of a larger action stay silent so the
+// user gets one clear confirmation instead of multiple stacked notifications.
+function notifyProfileActivated(
+  profile: Pick<ProfileSummary, 'name'> | undefined,
+  fallbackProfileId: string,
+): void {
+  showActionInformationMessage(
+    vscode.l10n.t(
+      'Switched to profile "{0}".',
+      getProfileNotificationName(profile, fallbackProfileId),
+    ),
+  )
+}
+
 async function activateProfileById(
   profileManager: ProfileManager,
   refreshCoordinator: RefreshCoordinator,
   profileId: string,
-): Promise<boolean> {
+): Promise<ProfileSummary | undefined> {
+  const profile = await profileManager.getProfile(profileId)
   const ok = await profileManager.setActiveProfileId(profileId)
   if (!ok) {
-    return false
+    return undefined
   }
 
   await afterProfileChange(refreshCoordinator, profileId)
+  notifyProfileActivated(profile, profileId)
   await maybeReloadWindowAfterProfileSwitch()
-  return true
+  return profile
 }
 
 /**
@@ -269,7 +298,9 @@ export function registerCommands(
           return
         }
 
+        const profile = await profileManager.getProfile(newId)
         await afterProfileChange(refreshCoordinator, newId)
+        notifyProfileActivated(profile, newId)
         await maybeReloadWindowAfterProfileSwitch()
         return
       }
@@ -291,6 +322,18 @@ export function registerCommands(
 
         if (bestProfileId) {
           if (bestProfileId === activeId) {
+            const activeProfile = profiles.find(
+              (profile) => profile.id === activeId,
+            )
+            showActionInformationMessage(
+              vscode.l10n.t(
+                'Profile "{0}" already has the best available quota.',
+                getProfileNotificationName(
+                  activeProfile,
+                  activeId || vscode.l10n.t('current'),
+                ),
+              ),
+            )
             return
           }
 
@@ -381,6 +424,12 @@ export function registerCommands(
         await profileManager.replaceProfileAuth(existing.id, authData)
         await profileManager.setActiveProfileId(existing.id)
         await afterProfileChange(refreshCoordinator, existing.id)
+        showActionInformationMessage(
+          vscode.l10n.t(
+            'Updated profile "{0}" from current auth.json and set it active.',
+            existing.name,
+          ),
+        )
         await maybeReloadWindowAfterProfileSwitch()
         return
       }
@@ -403,6 +452,12 @@ export function registerCommands(
       const profile = await profileManager.createProfile(name, authData)
       await profileManager.setActiveProfileId(profile.id)
       await afterProfileChange(refreshCoordinator, profile.id)
+      showActionInformationMessage(
+        vscode.l10n.t(
+          'Imported current auth.json as profile "{0}" and set it active.',
+          profile.name,
+        ),
+      )
       await maybeReloadWindowAfterProfileSwitch()
     },
   )
@@ -550,6 +605,12 @@ export function registerCommands(
         await profileManager.replaceProfileAuth(existing.id, authData)
         await profileManager.setActiveProfileId(existing.id)
         await afterProfileChange(refreshCoordinator, existing.id)
+        showActionInformationMessage(
+          vscode.l10n.t(
+            'Updated profile "{0}" from file and set it active.',
+            existing.name,
+          ),
+        )
         await maybeReloadWindowAfterProfileSwitch()
         return
       }
@@ -570,6 +631,12 @@ export function registerCommands(
       const profile = await profileManager.createProfile(name, authData)
       await profileManager.setActiveProfileId(profile.id)
       await afterProfileChange(refreshCoordinator, profile.id)
+      showActionInformationMessage(
+        vscode.l10n.t(
+          'Imported profile "{0}" from file and set it active.',
+          profile.name,
+        ),
+      )
       await maybeReloadWindowAfterProfileSwitch()
     },
   )
@@ -668,6 +735,9 @@ export function registerCommands(
 
       await profileManager.renameProfile(pick.profileId, newName)
       await refreshCoordinator.refreshUi()
+      showActionInformationMessage(
+        vscode.l10n.t('Renamed profile "{0}" to "{1}".', pick.label, newName),
+      )
     },
   )
 
@@ -695,6 +765,9 @@ export function registerCommands(
 
       await profileManager.deleteProfile(pick.profileId)
       await refreshCoordinator.refreshUi()
+      showActionInformationMessage(
+        vscode.l10n.t('Deleted profile "{0}".', pick.label),
+      )
     },
   )
 
@@ -702,7 +775,18 @@ export function registerCommands(
     'codex-switch.profile.refreshQuota',
     async (target?: unknown) => {
       const profileId = resolveProfileId(target)
+      const profile = profileId
+        ? await profileManager.getProfile(profileId)
+        : undefined
       await refreshCoordinator.refreshQuota(profileId)
+      showActionInformationMessage(
+        profileId
+          ? vscode.l10n.t(
+              'Refreshed quota for "{0}".',
+              getProfileNotificationName(profile, profileId),
+            )
+          : vscode.l10n.t('Refreshed quota for all profiles.'),
+      )
     },
   )
 
@@ -711,7 +795,7 @@ export function registerCommands(
     async (target?: unknown) => {
       const pick = await pickProfile(
         profileManager,
-        vscode.l10n.t('Refresh token'),
+        vscode.l10n.t('Renew token'),
         target,
       )
       if (!pick) {
@@ -721,12 +805,15 @@ export function registerCommands(
       const ok = await refreshCoordinator.refreshToken(pick.profileId)
       if (!ok) {
         void vscode.window.showErrorMessage(
-          vscode.l10n.t('Failed to refresh token for "{0}".', pick.label),
+          vscode.l10n.t('Failed to renew token for "{0}".', pick.label),
         )
         return
       }
 
       await refreshCoordinator.refreshQuota(pick.profileId)
+      showActionInformationMessage(
+        vscode.l10n.t('Renewed token for "{0}".', pick.label),
+      )
     },
   )
 
@@ -734,6 +821,9 @@ export function registerCommands(
     'codex-switch.profile.refreshAll',
     async () => {
       await refreshCoordinator.refreshAll()
+      showActionInformationMessage(
+        vscode.l10n.t('Refreshed profiles and quotas.'),
+      )
     },
   )
 

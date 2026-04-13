@@ -25,6 +25,8 @@ and keep profile state consistent across clients.
 1. Run `Codex Switch: Manage Profiles`.
 1. Import from current `auth.json` or from a selected JSON file.
 1. Switch profiles from the status bar, tooltip links, or the manage command.
+1. Use `Renew Token` from the profiles sidebar when you want to rotate saved
+   tokens without switching accounts.
 
 ## How Switching Works
 
@@ -117,9 +119,13 @@ Main settings:
 * `codexSwitch.reloadWindowAfterProfileSwitch`
 * `codexSwitch.statusBarClickBehavior` (`cycle`, `toggleLast`, or `bestQuota`)
 * `codexSwitch.statusBarSwitchTrigger` (`click` or `doubleClick`)
+* `codexSwitch.autoRenewTokens`
+* `codexSwitch.tokenAutoRenewIntervalMinutes`
+* `codexSwitch.quotaRefreshInterval`
 
 The profiles sidebar starts collapsed by default and keeps your expand/collapse
-state while health data refreshes.
+state while health data refreshes. Token auto-renew runs independently from
+quota refresh and defaults to every 60 minutes for all saved profiles.
 
 ## Security Notes
 

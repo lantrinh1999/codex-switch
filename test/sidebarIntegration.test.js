@@ -32,8 +32,16 @@ function createMemento() {
 function createVscodeMock(options = {}) {
   const registeredCommands = new Map()
   const executedCommands = []
+  const informationMessages = []
+  const warningMessages = []
+  const errorMessages = []
 
   return {
+    registeredCommands,
+    executedCommands,
+    informationMessages,
+    warningMessages,
+    errorMessages,
     l10n: {
       t(message, ...args) {
         return message.replace(/\{(\d+)\}/g, (_, index) =>
@@ -93,17 +101,20 @@ function createVscodeMock(options = {}) {
       },
     },
     window: {
-      async showInformationMessage() {
-        return undefined
+      async showInformationMessage(message) {
+        informationMessages.push(message)
+        return options.showInformationMessageResult
       },
-      async showWarningMessage() {
-        return undefined
+      async showWarningMessage(message) {
+        warningMessages.push(message)
+        return options.showWarningMessageResult
       },
-      async showErrorMessage() {
+      async showErrorMessage(message) {
+        errorMessages.push(message)
         return undefined
       },
       async showQuickPick() {
-        return undefined
+        return options.showQuickPickResult
       },
       async showInputBox() {
         return undefined
@@ -256,6 +267,9 @@ test('sidebar activate command switches the active profile and syncs auth.json',
       assert.equal(authJson.tokens.refresh_token, authData.refreshToken)
 
       assert.deepEqual(refreshCalls, ['ui', ['quota', profile.id]])
+      assert.deepEqual(vscodeMock.informationMessages, [
+        'Switched to profile "sidebar".',
+      ])
     })
   } finally {
     if (typeof previousCodexHome === 'undefined') {
@@ -503,6 +517,238 @@ test('status bar double-click trigger waits for the second click before switchin
       process.env.CODEX_HOME = previousCodexHome
     }
   }
+})
+
+test('renew token command works for a direct profile target and refreshes quota', async () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'codex-switch-renew-token-direct-test-'),
+  )
+  const globalStoragePath = path.join(tempDir, 'storage')
+  fs.mkdirSync(globalStoragePath, { recursive: true })
+
+  const vscodeMock = createVscodeMock()
+  const context = {
+    subscriptions: [],
+    globalStorageUri: { fsPath: globalStoragePath },
+    secrets: {
+      values: new Map(),
+      async get(key) {
+        return this.values.get(key)
+      },
+      async store(key, value) {
+        this.values.set(key, value)
+      },
+      async delete(key) {
+        this.values.delete(key)
+      },
+    },
+    globalState: createMemento(),
+    workspaceState: createMemento(),
+  }
+
+  await withMockedVscode(vscodeMock, async () => {
+    const profileManagerModule = require('../out/auth/profile-manager.js')
+    const commandsModule = require('../out/commands/index.js')
+    const { ProfileManager } = profileManagerModule
+    const { registerCommands } = commandsModule
+
+    const profileManager = new ProfileManager(context)
+    const profile = await profileManager.createProfile('renew-me', {
+      idToken: makeJwt({
+        email: 'renew@example.com',
+        'https://api.openai.com/auth': { chatgpt_plan_type: 'plus' },
+      }),
+      accessToken: makeJwt({
+        exp: Math.floor((Date.now() + 60 * 60 * 1000) / 1000),
+      }),
+      refreshToken: 'refresh-renew',
+      email: 'renew@example.com',
+      planType: 'plus',
+      authJson: {
+        tokens: { id_token: '', access_token: '', refresh_token: '' },
+      },
+    })
+
+    const calls = []
+    registerCommands(context, profileManager, {
+      async refreshUi() {},
+      async refreshAll() {},
+      async refreshQuota(profileId) {
+        calls.push(['quota', profileId])
+      },
+      async refreshToken(profileId) {
+        calls.push(['renew', profileId])
+        return true
+      },
+    })
+
+    await vscodeMock.commands.executeCommand(
+      'codex-switch.profile.refreshToken',
+      { profileId: profile.id },
+    )
+
+    assert.deepEqual(calls, [
+      ['renew', profile.id],
+      ['quota', profile.id],
+    ])
+    assert.deepEqual(vscodeMock.informationMessages, [
+      'Renewed token for "renew-me".',
+    ])
+  })
+})
+
+test('renew token command falls back to the picker when no target is provided', async () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'codex-switch-renew-token-picker-test-'),
+  )
+  const globalStoragePath = path.join(tempDir, 'storage')
+  fs.mkdirSync(globalStoragePath, { recursive: true })
+
+  const vscodeMock = createVscodeMock({
+    showQuickPickResult: {
+      label: 'picked-profile',
+      profileId: 'profile-picked',
+    },
+  })
+  const context = {
+    subscriptions: [],
+    globalStorageUri: { fsPath: globalStoragePath },
+    secrets: {
+      values: new Map(),
+      async get(key) {
+        return this.values.get(key)
+      },
+      async store(key, value) {
+        this.values.set(key, value)
+      },
+      async delete(key) {
+        this.values.delete(key)
+      },
+    },
+    globalState: createMemento(),
+    workspaceState: createMemento(),
+  }
+
+  await withMockedVscode(vscodeMock, async () => {
+    const profileManagerModule = require('../out/auth/profile-manager.js')
+    const commandsModule = require('../out/commands/index.js')
+    const { ProfileManager } = profileManagerModule
+    const { registerCommands } = commandsModule
+
+    const profileManager = new ProfileManager(context)
+    await profileManager.createProfile('picked-profile', {
+      idToken: makeJwt({
+        email: 'picked@example.com',
+        'https://api.openai.com/auth': { chatgpt_plan_type: 'plus' },
+      }),
+      accessToken: makeJwt({
+        exp: Math.floor((Date.now() + 60 * 60 * 1000) / 1000),
+      }),
+      refreshToken: 'refresh-picked',
+      email: 'picked@example.com',
+      planType: 'plus',
+      authJson: {
+        tokens: { id_token: '', access_token: '', refresh_token: '' },
+      },
+    })
+
+    const calls = []
+    registerCommands(context, profileManager, {
+      async refreshUi() {},
+      async refreshAll() {},
+      async refreshQuota(profileId) {
+        calls.push(['quota', profileId])
+      },
+      async refreshToken(profileId) {
+        calls.push(['renew', profileId])
+        return true
+      },
+    })
+
+    await vscodeMock.commands.executeCommand('codex-switch.profile.refreshToken')
+
+    assert.deepEqual(calls, [
+      ['renew', 'profile-picked'],
+      ['quota', 'profile-picked'],
+    ])
+    assert.deepEqual(vscodeMock.informationMessages, [
+      'Renewed token for "picked-profile".',
+    ])
+  })
+})
+
+test('refresh quota command notifies after a direct profile refresh', async () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'codex-switch-refresh-quota-direct-test-'),
+  )
+  const globalStoragePath = path.join(tempDir, 'storage')
+  fs.mkdirSync(globalStoragePath, { recursive: true })
+
+  const vscodeMock = createVscodeMock()
+  const context = {
+    subscriptions: [],
+    globalStorageUri: { fsPath: globalStoragePath },
+    secrets: {
+      values: new Map(),
+      async get(key) {
+        return this.values.get(key)
+      },
+      async store(key, value) {
+        this.values.set(key, value)
+      },
+      async delete(key) {
+        this.values.delete(key)
+      },
+    },
+    globalState: createMemento(),
+    workspaceState: createMemento(),
+  }
+
+  await withMockedVscode(vscodeMock, async () => {
+    const profileManagerModule = require('../out/auth/profile-manager.js')
+    const commandsModule = require('../out/commands/index.js')
+    const { ProfileManager } = profileManagerModule
+    const { registerCommands } = commandsModule
+
+    const profileManager = new ProfileManager(context)
+    const profile = await profileManager.createProfile('quota-me', {
+      idToken: makeJwt({
+        email: 'quota@example.com',
+        'https://api.openai.com/auth': { chatgpt_plan_type: 'plus' },
+      }),
+      accessToken: makeJwt({
+        exp: Math.floor((Date.now() + 60 * 60 * 1000) / 1000),
+      }),
+      refreshToken: 'refresh-quota',
+      email: 'quota@example.com',
+      planType: 'plus',
+      authJson: {
+        tokens: { id_token: '', access_token: '', refresh_token: '' },
+      },
+    })
+
+    const calls = []
+    registerCommands(context, profileManager, {
+      async refreshUi() {},
+      async refreshAll() {},
+      async refreshQuota(profileId) {
+        calls.push(['quota', profileId])
+      },
+      async refreshToken() {
+        return true
+      },
+    })
+
+    await vscodeMock.commands.executeCommand(
+      'codex-switch.profile.refreshQuota',
+      { profileId: profile.id },
+    )
+
+    assert.deepEqual(calls, [['quota', profile.id]])
+    assert.deepEqual(vscodeMock.informationMessages, [
+      'Refreshed quota for "quota-me".',
+    ])
+  })
 })
 
 test('expand all command reveals every profile root item', async () => {

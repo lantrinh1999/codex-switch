@@ -72,16 +72,36 @@ test('profiles sidebar commands use native action icons', () => {
 
 test('profile item context menu exposes switch and refresh actions', () => {
   const contextMenus = manifest.contributes.menus['view/item/context'] ?? []
-  const rootActions = contextMenus
+  const rootRefreshActions = contextMenus
     .filter(
       (item) =>
         item.when === 'view == codexSwitchProfiles && viewItem == profileItem',
     )
+    .filter(
+      (item) =>
+        typeof item.group === 'string' && item.group.startsWith('refresh@'),
+    )
     .map((item) => item.command)
 
-  assert.deepEqual(rootActions, [
-    'codex-switch.profile.activate',
+  assert.deepEqual(rootRefreshActions, [
     'codex-switch.profile.refreshQuota',
+    'codex-switch.profile.refreshToken',
+  ])
+
+  const rootContextActions = contextMenus
+    .filter(
+      (item) =>
+        item.when === 'view == codexSwitchProfiles && viewItem == profileItem',
+    )
+    .filter(
+      (item) =>
+        typeof item.group === 'string' &&
+        (item.group.startsWith('inline@') || item.group.startsWith('context@')),
+    )
+    .map((item) => item.command)
+
+  assert.deepEqual(rootContextActions, [
+    'codex-switch.profile.activate',
     'codex-switch.profile.refreshToken',
     'codex-switch.profile.rename',
     'codex-switch.profile.delete',
@@ -105,6 +125,28 @@ test('quota refresh interval setting is contributed', () => {
   assert.equal(setting?.type, 'number')
   assert.equal(setting?.default, 300)
   assert.equal(setting?.minimum, 60)
+})
+
+test('token auto-renew settings are contributed', () => {
+  const autoRenewSetting =
+    manifest.contributes.configuration.properties['codexSwitch.autoRenewTokens']
+  const intervalSetting =
+    manifest.contributes.configuration.properties[
+      'codexSwitch.tokenAutoRenewIntervalMinutes'
+    ]
+
+  assert.equal(autoRenewSetting?.type, 'boolean')
+  assert.equal(autoRenewSetting?.default, true)
+  assert.equal(intervalSetting?.type, 'number')
+  assert.equal(intervalSetting?.default, 60)
+  assert.equal(intervalSetting?.minimum, 5)
+})
+
+test('renew token command keeps the existing command id', () => {
+  const contribution = getCommandContribution('codex-switch.profile.refreshToken')
+
+  assert.equal(contribution?.title, '%command.profile.refreshToken.title%')
+  assert.equal(contribution?.icon, '$(refresh)')
 })
 
 test('status bar click behavior includes bestQuota', () => {

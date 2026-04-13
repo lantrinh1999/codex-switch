@@ -229,6 +229,11 @@
           "group": "inline@1"
         },
         {
+          "command": "codex-switch.profile.refreshToken",
+          "when": "view == codexSwitchProfiles && viewItem == profileItem",
+          "group": "inline@2"
+        },
+        {
           "command": "codex-switch.profile.refreshQuota",
           "when": "view == codexSwitchProfiles && viewItem == profileItem",
           "group": "refresh@1"
@@ -299,6 +304,17 @@
           "default": 300,
           "minimum": 60,
           "description": "%configuration.quotaRefreshInterval.description%"
+        },
+        "codexSwitch.autoRenewTokens": {
+          "type": "boolean",
+          "default": true,
+          "description": "%configuration.autoRenewTokens.description%"
+        },
+        "codexSwitch.tokenAutoRenewIntervalMinutes": {
+          "type": "number",
+          "default": 60,
+          "minimum": 5,
+          "description": "%configuration.tokenAutoRenewIntervalMinutes.description%"
         },
         "codexSwitch.statusBarClickBehavior": {
           "type": "string",

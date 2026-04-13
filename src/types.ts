@@ -75,6 +75,8 @@ export interface ProfileHealthState {
   authErrorMessage?: string
   tokenStatus: TokenStatus | null
   refreshTokenStatus: RefreshTokenStatus
+  lastRenewedAt: string | null
+  tokenRenewErrorMessage?: string
   quotaInfo: QuotaInfo | null
   quotaLoading: boolean
   quotaErrorMessage?: string

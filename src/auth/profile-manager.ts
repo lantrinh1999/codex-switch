@@ -1,21 +1,25 @@
 import * as vscode from 'vscode'
 import * as fs from 'fs'
+import * as os from 'os'
 import * as path from 'path'
 import { randomUUID } from 'crypto'
 import { AuthData, ProfileSummary, StorageMode } from '../types'
 import { getDefaultCodexAuthPath, loadAuthDataFromFile } from './auth-manager'
 import { syncCodexAuthFile } from './codex-auth-sync'
 import {
+  acquireJsonLease,
   SharedActiveProfile,
   SHARED_ACTIVE_PROFILE_FILENAME,
   deleteFileIfExists,
   ensureSharedStoreDirs,
   getSharedActiveProfilePath,
+  getSharedProfileRenewLeasePath,
   getSharedProfileSecretsPath,
   getSharedProfilesDir,
   getSharedProfilesPath,
   getSharedStoreRoot,
   readJsonFile,
+  releaseJsonLease,
   writeJsonFile,
 } from './shared-profile-store'
 
@@ -33,6 +37,7 @@ const PROFILES_FILENAME = 'profiles.json'
 const ACTIVE_PROFILE_KEY = 'codexSwitch.activeProfileId'
 const LAST_PROFILE_KEY = 'codexSwitch.lastProfileId'
 const MIGRATED_LEGACY_KEY = 'codexSwitch.migratedLegacyProfiles'
+const PROFILE_RENEW_LEASE_TTL_MS = 5 * 60 * 1000
 
 // Backward compatibility keys (pre-rename).
 const OLD_ACTIVE_PROFILE_KEY = 'codexUsage.activeProfileId'
@@ -85,6 +90,7 @@ export class ProfileManager {
   constructor(private context: vscode.ExtensionContext) {}
 
   private lastSyncedProfileId: string | undefined
+  private readonly renewLeaseOwner = `${os.hostname()}:${process.pid}:${randomUUID()}`
 
   private getConfiguredStorageMode(): StorageMode {
     const cfg = vscode.workspace.getConfiguration('codexSwitch')
@@ -887,6 +893,41 @@ export class ProfileManager {
       email: profile.email,
       planType: profile.planType,
       authJson: tokens.authJson,
+    }
+  }
+
+  isUsingRemoteFilesStorage(): boolean {
+    return this.isRemoteFilesMode()
+  }
+
+  async withProfileRenewLease<T>(
+    profileId: string,
+    task: () => Promise<T>,
+  ): Promise<{ acquired: boolean; value?: T }> {
+    if (!this.isRemoteFilesMode()) {
+      return {
+        acquired: true,
+        value: await task(),
+      }
+    }
+
+    const leasePath = getSharedProfileRenewLeasePath(profileId)
+    const acquired = acquireJsonLease(
+      leasePath,
+      this.renewLeaseOwner,
+      PROFILE_RENEW_LEASE_TTL_MS,
+    )
+    if (!acquired) {
+      return { acquired: false }
+    }
+
+    try {
+      return {
+        acquired: true,
+        value: await task(),
+      }
+    } finally {
+      releaseJsonLease(leasePath, this.renewLeaseOwner)
     }
   }
 

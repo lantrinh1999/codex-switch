@@ -43,5 +43,14 @@
   "Export profiles...": "Export profiles...",
   "Selected file is not a valid JSON profiles export.": "Selected file is not a valid JSON profiles export.",
   "Failed to import profiles: {0}": "Failed to import profiles: {0}",
-  "Add from current auth.json": "Add from current auth.json"
+  "Add from current auth.json": "Add from current auth.json",
+  "Renew token": "Renew token",
+  "Failed to renew token for \"{0}\".": "Failed to renew token for \"{0}\".",
+  "Renewing token": "Renewing token",
+  "Renewing": "Renewing",
+  "Last renewed": "Last renewed",
+  "Token renewal": "Token renewal",
+  "Never": "Never",
+  "Unavailable": "Unavailable",
+  "Token renewal is already running on another client.": "Token renewal is already running on another client."
 }

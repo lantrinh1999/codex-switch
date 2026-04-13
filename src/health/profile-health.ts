@@ -319,6 +319,33 @@ export function getRefreshTokenStatus(authData: AuthData): RefreshTokenStatus {
   }
 }
 
+export function getLastRefreshTimestamp(authData: AuthData): string | null {
+  const raw = authData.authJson?.last_refresh
+  return typeof raw === 'string' && raw.trim() ? raw.trim() : null
+}
+
+export function isTokenRenewDue(
+  authData: AuthData,
+  intervalMinutes: number,
+  now = Date.now(),
+): boolean {
+  if (!authData.refreshToken || !authData.refreshToken.trim()) {
+    return false
+  }
+
+  const lastRefresh = getLastRefreshTimestamp(authData)
+  if (!lastRefresh) {
+    return true
+  }
+
+  const lastRefreshAt = Date.parse(lastRefresh)
+  if (!Number.isFinite(lastRefreshAt)) {
+    return true
+  }
+
+  return now - lastRefreshAt >= intervalMinutes * 60 * 1000
+}
+
 export function isAuthPayloadTokenExpired(payload: AuthPayload): boolean {
   const expiry = getJwtExpiry(payload.tokens?.access_token)
   if (!expiry) {
