@@ -14,7 +14,8 @@ import {
 import { RefreshCoordinator } from './ui/refresh-coordinator'
 import { registerCommands } from './commands'
 import { debugLog, errorLog } from './utils/log'
-import { ProfileSummary, RuntimeSession } from './types'
+import { ProfileSummary, RuntimeIsolationStatus, RuntimeSession } from './types'
+import { adoptManagedRuntimeEnvironmentFromContext } from './auth/runtime-isolation'
 
 let profileManager: ProfileManager | undefined
 let profileHealthService: ProfileHealthService | undefined
@@ -23,9 +24,14 @@ let refreshCoordinator: RefreshCoordinator | undefined
 let cachedProfiles: ProfileSummary[] = []
 let cachedRuntimeSession: RuntimeSession | null = null
 let lastWarningSignature: string | undefined
+const RELAUNCH_ISOLATED_WINDOW_COMMAND =
+  'codex-switch.runtime.relaunchIsolatedWindow'
 
 export function activate(context: vscode.ExtensionContext) {
   debugLog('Codex Switch activated')
+  if (adoptManagedRuntimeEnvironmentFromContext(context)) {
+    debugLog('Adopted managed isolated runtime environment from user-data dir')
+  }
 
   const statusBarItem = createStatusBarItem()
   context.subscriptions.push(statusBarItem)
@@ -147,19 +153,59 @@ function renderProfileUi() {
   )
 }
 
-function maybeShowWarning(message: string | undefined) {
+interface WarningAction {
+  label: string
+  command: string
+}
+
+function maybeShowWarning(message: string | undefined, action?: WarningAction) {
   const signature = message?.trim() || undefined
   if (!signature) {
     lastWarningSignature = undefined
     return
   }
 
-  if (signature === lastWarningSignature) {
+  // Include the command in the de-duplication key so the same warning text can
+  // safely gain or lose a recovery action after configuration changes.
+  const actionSignature = action
+    ? `${signature}\ncommand:${action.command}`
+    : signature
+  if (actionSignature === lastWarningSignature) {
     return
   }
 
-  lastWarningSignature = signature
-  void vscode.window.showWarningMessage(signature)
+  lastWarningSignature = actionSignature
+  const warning = action
+    ? vscode.window.showWarningMessage(signature, action.label)
+    : vscode.window.showWarningMessage(signature)
+
+  if (!action) {
+    return
+  }
+
+  void warning.then((picked) => {
+    if (picked !== action.label) {
+      return
+    }
+
+    // The relaunch command already owns descriptor validation and launch
+    // failure handling. Keeping this path as a command dispatch avoids
+    // duplicating process-spawn behavior in the activation warning flow.
+    void vscode.commands.executeCommand(action.command)
+  })
+}
+
+function getRuntimeIsolationWarningAction(
+  isolationStatus: RuntimeIsolationStatus,
+): WarningAction | undefined {
+  if (!isolationStatus.requiresRelaunch || !isolationStatus.warningMessage) {
+    return undefined
+  }
+
+  return {
+    label: vscode.l10n.t('Open isolated runtime window'),
+    command: RELAUNCH_ISOLATED_WINDOW_COMMAND,
+  }
 }
 
 async function refreshProfileUi() {
@@ -175,8 +221,13 @@ async function refreshProfileUi() {
 
   cachedProfiles = profiles
   cachedRuntimeSession = runtimeSession
+  const warningMessage =
+    isolationStatus.warningMessage || runtimeSession.warningMessage
   maybeShowWarning(
-    isolationStatus.warningMessage || runtimeSession.warningMessage,
+    warningMessage,
+    isolationStatus.warningMessage
+      ? getRuntimeIsolationWarningAction(isolationStatus)
+      : undefined,
   )
   renderProfileUi()
 }

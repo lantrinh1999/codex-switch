@@ -174,3 +174,123 @@ test('isolated instance status requires the managed env markers', async () => {
     }
   })
 })
+
+test('managed user-data directory repairs missing isolated runtime env markers', async () => {
+  const workspaceFile = createFileUri('/tmp/project/project.code-workspace')
+  const vscodeMock = createVscodeMock({
+    runtimeIsolationMode: 'isolatedInstance',
+    workspaceFile,
+  })
+
+  await withMockedVscode(vscodeMock, async () => {
+    const isolation = require('../out/auth/runtime-isolation.js')
+    const descriptor = isolation.getWorkspaceIsolationDescriptor()
+    const previousCodexHome = process.env.CODEX_HOME
+    const previousKey = process.env.CODEX_SWITCH_ISOLATED_WORKSPACE_KEY
+    const previousUserData = process.env.CODEX_SWITCH_ISOLATED_USER_DATA_DIR
+
+    delete process.env.CODEX_HOME
+    delete process.env.CODEX_SWITCH_ISOLATED_WORKSPACE_KEY
+    delete process.env.CODEX_SWITCH_ISOLATED_USER_DATA_DIR
+
+    try {
+      const repaired = isolation.adoptManagedRuntimeEnvironmentFromContext({
+        globalStorageUri: createFileUri(
+          path.join(
+            descriptor.userDataDir,
+            'User',
+            'globalStorage',
+            'woozy-masta.codex-switch',
+          ),
+        ),
+      })
+
+      assert.equal(repaired, true)
+      assert.equal(process.env.CODEX_HOME, descriptor.codexHome)
+      assert.equal(
+        process.env.CODEX_SWITCH_ISOLATED_WORKSPACE_KEY,
+        descriptor.workspaceKey,
+      )
+      assert.equal(
+        process.env.CODEX_SWITCH_ISOLATED_USER_DATA_DIR,
+        descriptor.userDataDir,
+      )
+
+      const status = isolation.getRuntimeIsolationStatus()
+      assert.equal(status.isManagedWindow, true)
+      assert.equal(status.requiresRelaunch, false)
+      assert.equal(status.warningMessage, undefined)
+    } finally {
+      if (typeof previousCodexHome === 'undefined') {
+        delete process.env.CODEX_HOME
+      } else {
+        process.env.CODEX_HOME = previousCodexHome
+      }
+      if (typeof previousKey === 'undefined') {
+        delete process.env.CODEX_SWITCH_ISOLATED_WORKSPACE_KEY
+      } else {
+        process.env.CODEX_SWITCH_ISOLATED_WORKSPACE_KEY = previousKey
+      }
+      if (typeof previousUserData === 'undefined') {
+        delete process.env.CODEX_SWITCH_ISOLATED_USER_DATA_DIR
+      } else {
+        process.env.CODEX_SWITCH_ISOLATED_USER_DATA_DIR = previousUserData
+      }
+    }
+  })
+})
+
+test('unmanaged user-data directory does not repair isolated runtime env markers', async () => {
+  const workspaceFile = createFileUri('/tmp/project/project.code-workspace')
+  const vscodeMock = createVscodeMock({
+    runtimeIsolationMode: 'isolatedInstance',
+    workspaceFile,
+  })
+
+  await withMockedVscode(vscodeMock, async () => {
+    const isolation = require('../out/auth/runtime-isolation.js')
+    const descriptor = isolation.getWorkspaceIsolationDescriptor()
+    const previousCodexHome = process.env.CODEX_HOME
+    const previousKey = process.env.CODEX_SWITCH_ISOLATED_WORKSPACE_KEY
+    const previousUserData = process.env.CODEX_SWITCH_ISOLATED_USER_DATA_DIR
+
+    delete process.env.CODEX_HOME
+    delete process.env.CODEX_SWITCH_ISOLATED_WORKSPACE_KEY
+    delete process.env.CODEX_SWITCH_ISOLATED_USER_DATA_DIR
+
+    try {
+      const repaired = isolation.adoptManagedRuntimeEnvironmentFromContext({
+        globalStorageUri: createFileUri(
+          path.join(
+            descriptor.baseDir,
+            'other-user-data',
+            'User',
+            'globalStorage',
+            'woozy-masta.codex-switch',
+          ),
+        ),
+      })
+
+      assert.equal(repaired, false)
+      assert.equal(process.env.CODEX_HOME, undefined)
+      assert.equal(process.env.CODEX_SWITCH_ISOLATED_WORKSPACE_KEY, undefined)
+      assert.equal(process.env.CODEX_SWITCH_ISOLATED_USER_DATA_DIR, undefined)
+    } finally {
+      if (typeof previousCodexHome === 'undefined') {
+        delete process.env.CODEX_HOME
+      } else {
+        process.env.CODEX_HOME = previousCodexHome
+      }
+      if (typeof previousKey === 'undefined') {
+        delete process.env.CODEX_SWITCH_ISOLATED_WORKSPACE_KEY
+      } else {
+        process.env.CODEX_SWITCH_ISOLATED_WORKSPACE_KEY = previousKey
+      }
+      if (typeof previousUserData === 'undefined') {
+        delete process.env.CODEX_SWITCH_ISOLATED_USER_DATA_DIR
+      } else {
+        process.env.CODEX_SWITCH_ISOLATED_USER_DATA_DIR = previousUserData
+      }
+    }
+  })
+})

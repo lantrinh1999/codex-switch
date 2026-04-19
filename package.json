@@ -7,7 +7,7 @@
   },
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "3.0.120",
+  "version": "3.0.121",
   "license": "MIT",
   "publisher": "woozy-masta",
   "files": [

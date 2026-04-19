@@ -85,7 +85,7 @@ function createStatusBarItem() {
   }
 }
 
-function createVscodeMock() {
+function createVscodeMock(options = {}) {
   const registeredCommands = new Map()
 
   class EventEmitter {
@@ -189,7 +189,10 @@ function createVscodeMock() {
           },
         }
       },
-      async showWarningMessage() {
+      async showWarningMessage(message, ...items) {
+        if (options.showWarningMessage) {
+          return options.showWarningMessage(message, ...items)
+        }
         return undefined
       },
       async showInformationMessage() {
@@ -212,6 +215,7 @@ function createVscodeMock() {
       },
     },
     workspace: {
+      workspaceFile: options.workspaceFile,
       workspaceFolders: undefined,
       getConfiguration(section) {
         return {
@@ -223,7 +227,7 @@ function createVscodeMock() {
               return 'global'
             }
             if (section === 'codexSwitch' && key === 'runtimeIsolationMode') {
-              return 'sharedRuntime'
+              return options.runtimeIsolationMode ?? 'sharedRuntime'
             }
             if (section === 'codexSwitch' && key === 'quotaRefreshInterval') {
               return 0
@@ -278,12 +282,30 @@ function createVscodeMock() {
         }
       },
       async executeCommand(command, ...args) {
+        if (options.onExecuteCommand) {
+          const intercepted = await options.onExecuteCommand(command, ...args)
+          if (intercepted === true) {
+            return undefined
+          }
+        }
         const callback = registeredCommands.get(command)
         if (!callback) {
           return undefined
         }
         return callback(...args)
       },
+    },
+  }
+}
+
+function createFileUri(fsPath) {
+  return {
+    scheme: 'file',
+    fsPath,
+    path: fsPath,
+    authority: '',
+    toString() {
+      return `file://${fsPath}`
     },
   }
 }
@@ -364,4 +386,47 @@ test('extension activation does not overwrite a newer external auth.json session
       process.env.CODEX_HOME = previousCodexHome
     }
   }
+})
+
+test('isolated runtime warning offers a relaunch action', async () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'codex-switch-extension-isolation-'),
+  )
+  const globalStoragePath = path.join(tempDir, 'storage')
+  fs.mkdirSync(globalStoragePath, { recursive: true })
+
+  const warningMessages = []
+  const executedCommands = []
+  const relaunchLabel = 'Open isolated runtime window'
+  const vscodeMock = createVscodeMock({
+    runtimeIsolationMode: 'isolatedInstance',
+    workspaceFile: createFileUri(path.join(tempDir, 'project.code-workspace')),
+    async showWarningMessage(message, ...items) {
+      warningMessages.push({ message, items })
+      return relaunchLabel
+    },
+    async onExecuteCommand(command) {
+      executedCommands.push(command)
+      return command === 'codex-switch.runtime.relaunchIsolatedWindow'
+    },
+  })
+
+  await withMockedVscode(vscodeMock, async () => {
+    const extension = require('../out/extension.js')
+    const context = createExtensionContext(globalStoragePath)
+
+    extension.activate(context)
+    await new Promise((resolve) => setImmediate(resolve))
+    await new Promise((resolve) => setImmediate(resolve))
+
+    assert.equal(warningMessages.length, 1)
+    assert.match(
+      warningMessages[0].message,
+      /configured for isolated runtime mode/,
+    )
+    assert.deepEqual(warningMessages[0].items, [relaunchLabel])
+    assert.deepEqual(executedCommands, [
+      'codex-switch.runtime.relaunchIsolatedWindow',
+    ])
+  })
 })

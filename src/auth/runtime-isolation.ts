@@ -74,6 +74,23 @@ function sanitizeLabel(label: string): string {
   return next || 'window'
 }
 
+function normalizeComparablePath(value: string): string {
+  const resolved = path.resolve(value)
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved
+}
+
+function isPathInsideOrEqual(parent: string, child: string): boolean {
+  const normalizedParent = normalizeComparablePath(parent)
+  const normalizedChild = normalizeComparablePath(child)
+  const relative = path.relative(normalizedParent, normalizedChild)
+  return (
+    relative === '' ||
+    (relative !== '..' &&
+      !relative.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(relative))
+  )
+}
+
 function getUriKey(value: vscode.Uri): string {
   if (value.scheme === 'file') {
     return value.fsPath
@@ -202,6 +219,42 @@ export function ensureWorkspaceIsolationDirs(
   // create them under the user home instead of VS Code global storage.
   fs.mkdirSync(descriptor.userDataDir, { recursive: true, mode: 0o700 })
   fs.mkdirSync(descriptor.codexHome, { recursive: true, mode: 0o700 })
+}
+
+export function adoptManagedRuntimeEnvironmentFromContext(
+  context: Pick<vscode.ExtensionContext, 'globalStorageUri'>,
+): boolean {
+  if (getRuntimeIsolationMode() !== 'isolatedInstance') {
+    return false
+  }
+
+  const descriptor = getWorkspaceIsolationDescriptor()
+  if (descriptor.launchTarget.kind === 'unsupported') {
+    return false
+  }
+
+  const storageUri = context.globalStorageUri
+  const storagePath =
+    storageUri && (!storageUri.scheme || storageUri.scheme === 'file')
+      ? asNonEmptyString(storageUri.fsPath)
+      : undefined
+  if (!storagePath) {
+    return false
+  }
+
+  if (!isPathInsideOrEqual(descriptor.userDataDir, storagePath)) {
+    return false
+  }
+
+  // VS Code desktop launchers can preserve --user-data-dir while dropping the
+  // environment passed to the `code` CLI before the extension host starts. In
+  // that case the managed user-data directory is the durable signal that this
+  // is the isolated instance, so hydrate the env markers before auth paths are
+  // resolved from CODEX_HOME.
+  process.env.CODEX_HOME = descriptor.codexHome
+  process.env[ISOLATED_INSTANCE_KEY_ENV] = descriptor.workspaceKey
+  process.env[ISOLATED_INSTANCE_USER_DATA_ENV] = descriptor.userDataDir
+  return true
 }
 
 export function getRuntimeIsolationStatus(): RuntimeIsolationStatus {
