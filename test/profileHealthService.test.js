@@ -54,7 +54,6 @@ function createExtensionContext(globalStoragePath) {
 
 function createVscodeMock(options = {}) {
   const configurationValues = {
-    activeProfileScope: 'global',
     storageMode: options.storageMode ?? 'secretStorage',
     quotaRefreshInterval:
       typeof options.quotaRefreshInterval === 'number'

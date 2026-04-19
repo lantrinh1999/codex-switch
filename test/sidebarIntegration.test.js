@@ -65,9 +65,6 @@ function createVscodeMock(options = {}) {
       getConfiguration(section) {
         return {
           get(key, defaultValue) {
-            if (section === 'codexSwitch' && key === 'activeProfileScope') {
-              return 'global'
-            }
             if (section === 'codexSwitch' && key === 'storageMode') {
               return 'secretStorage'
             }

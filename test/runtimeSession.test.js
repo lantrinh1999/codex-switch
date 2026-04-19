@@ -104,15 +104,6 @@ function createVscodeMock(options = {}) {
             if (section === 'codexSwitch' && key === 'storageMode') {
               return options.storageMode ?? 'secretStorage'
             }
-            if (section === 'codexSwitch' && key === 'activeProfileScope') {
-              return options.activeProfileScope ?? 'global'
-            }
-            if (section === 'codexSwitch' && key === 'runtimeIsolationMode') {
-              return options.runtimeIsolationMode ?? 'sharedRuntime'
-            }
-            if (section === 'codexUsage' && key === 'activeProfileScope') {
-              return options.legacyActiveProfileScope ?? 'global'
-            }
             return defaultValue
           },
           has() {

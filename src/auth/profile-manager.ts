@@ -3,19 +3,9 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { randomUUID } from 'crypto'
-import {
-  AuthData,
-  ProfileSummary,
-  RuntimeIsolationStatus,
-  RuntimeSession,
-  StorageMode,
-} from '../types'
+import { AuthData, ProfileSummary, RuntimeSession, StorageMode } from '../types'
 import { getDefaultCodexAuthPath, loadAuthDataFromFile } from './auth-manager'
 import { syncCodexAuthFile } from './codex-auth-sync'
-import {
-  getEffectiveActiveProfileScope,
-  getRuntimeIsolationStatus as resolveRuntimeIsolationStatus,
-} from './runtime-isolation'
 import {
   acquireJsonLease,
   SharedActiveProfile,
@@ -346,37 +336,82 @@ export class ProfileManager {
     deleteFileIfExists(getSharedActiveProfilePath())
   }
 
-  getRuntimeIsolationStatus(): RuntimeIsolationStatus {
-    return resolveRuntimeIsolationStatus()
+  private async clearStateKey(
+    bucket: vscode.Memento,
+    key: string,
+  ): Promise<void> {
+    if (typeof bucket.get<string>(key) === 'undefined') {
+      return
+    }
+    await bucket.update(key, undefined)
   }
 
-  private canWriteRuntimeAuth(interactive = true): boolean {
-    const status = this.getRuntimeIsolationStatus()
-    if (!status.requiresRelaunch && !status.warningMessage) {
-      return true
-    }
-
-    if (!interactive) {
-      return false
-    }
-
-    const message =
-      status.warningMessage ||
-      vscode.l10n.t(
-        'This window is not ready to write the managed runtime auth file.',
-      )
-    void vscode.window.showWarningMessage(message)
-    return false
+  private async clearRetiredLocalState(
+    currentKey: string,
+    legacyKey: string,
+  ): Promise<void> {
+    // Workspace-scoped selection state used to be valid only when runtime
+    // isolation was enabled. After removing that feature, the current window
+    // still needs to retire any workspace copy it can see so a stale local
+    // value does not keep shadowing the new global-only behavior.
+    await this.clearStateKey(this.context.workspaceState, currentKey)
+    await this.clearStateKey(this.context.workspaceState, legacyKey)
+    await this.clearStateKey(this.context.globalState, legacyKey)
   }
 
-  private syncRuntimeAuth(authData: AuthData, profileId: string): boolean {
-    if (!this.canWriteRuntimeAuth()) {
-      return false
-    }
-
+  private syncRuntimeAuth(authData: AuthData, profileId: string): void {
     syncCodexAuthFile(getDefaultCodexAuthPath(), authData)
     this.lastSyncedProfileId = profileId
-    return true
+  }
+
+  private async readMigratedLocalState(
+    currentKey: string,
+    legacyKey: string,
+  ): Promise<string | undefined> {
+    const globalBucket = this.context.globalState
+    const workspaceBucket = this.context.workspaceState
+    const globalValue = globalBucket.get<string>(currentKey)
+    if (globalValue) {
+      await this.clearRetiredLocalState(currentKey, legacyKey)
+      return globalValue
+    }
+
+    const workspaceValue = workspaceBucket.get<string>(currentKey)
+    if (workspaceValue) {
+      // When users upgrade away from isolated workspaces, preserve the last
+      // workspace-scoped choice they can still reach by promoting it into the
+      // new global slot on first read. Global wins when both are present so
+      // opening an older workspace later cannot overwrite a newer shared
+      // selection that the user already made after upgrading.
+      await globalBucket.update(currentKey, workspaceValue)
+      await this.clearRetiredLocalState(currentKey, legacyKey)
+      return workspaceValue
+    }
+
+    const globalLegacy = globalBucket.get<string>(legacyKey)
+    if (globalLegacy) {
+      await globalBucket.update(currentKey, globalLegacy)
+      await this.clearRetiredLocalState(currentKey, legacyKey)
+      return globalLegacy
+    }
+
+    const workspaceLegacy = workspaceBucket.get<string>(legacyKey)
+    if (!workspaceLegacy) {
+      return undefined
+    }
+
+    await globalBucket.update(currentKey, workspaceLegacy)
+    await this.clearRetiredLocalState(currentKey, legacyKey)
+    return workspaceLegacy
+  }
+
+  private async writeLocalState(
+    currentKey: string,
+    legacyKey: string,
+    value: string | undefined,
+  ): Promise<void> {
+    await this.context.globalState.update(currentKey, value)
+    await this.clearRetiredLocalState(currentKey, legacyKey)
   }
 
   private async getPersistedActiveProfileId(): Promise<string | undefined> {
@@ -384,27 +419,10 @@ export class ProfileManager {
       return this.readSharedActiveProfile()?.profileId
     }
 
-    const bucket = this.getStateBucket()
-    const next = bucket.get<string>(ACTIVE_PROFILE_KEY)
-    if (next) {
-      return next
-    }
-
-    // Keep the migration lazy so the extension does not rewrite state until a
-    // real read happens. This avoids touching workspace/global mementos on
-    // startup when the user never used the old key.
-    const legacyBucket = this.getLegacyStateBucket()
-    const legacy =
-      bucket.get<string>(OLD_ACTIVE_PROFILE_KEY) ||
-      legacyBucket.get<string>(OLD_ACTIVE_PROFILE_KEY)
-    if (!legacy) {
-      return undefined
-    }
-
-    await bucket.update(ACTIVE_PROFILE_KEY, legacy)
-    await bucket.update(OLD_ACTIVE_PROFILE_KEY, undefined)
-    await legacyBucket.update(OLD_ACTIVE_PROFILE_KEY, undefined)
-    return legacy
+    return this.readMigratedLocalState(
+      ACTIVE_PROFILE_KEY,
+      OLD_ACTIVE_PROFILE_KEY,
+    )
   }
 
   private buildRuntimeWarningMessage(
@@ -937,14 +955,10 @@ export class ProfileManager {
       return true
     }
 
-    // Token rotation should keep the runtime file aligned only when the
-    // current window is actually allowed to own that runtime file. In isolated
-    // mode we intentionally avoid overwriting shared auth when the relaunch
-    // requirement has not been satisfied yet.
-    if (this.canWriteRuntimeAuth(false)) {
-      syncCodexAuthFile(getDefaultCodexAuthPath(), authData)
-      this.lastSyncedProfileId = profileId
-    }
+    // Once isolated runtime support is removed, the active local profile owns
+    // the runtime auth file unconditionally. Keeping this sync eager ensures
+    // background token renewal cannot leave auth.json behind the saved profile.
+    this.syncRuntimeAuth(authData, profileId)
     return true
   }
 
@@ -1086,21 +1100,6 @@ export class ProfileManager {
     }
   }
 
-  private getStateBucket(): vscode.Memento {
-    return getEffectiveActiveProfileScope() === 'workspace'
-      ? this.context.workspaceState
-      : this.context.globalState
-  }
-
-  private getLegacyStateBucket(): vscode.Memento {
-    const scope = vscode.workspace
-      .getConfiguration('codexUsage')
-      .get<'global' | 'workspace'>('activeProfileScope', 'global')
-    return scope === 'workspace'
-      ? this.context.workspaceState
-      : this.context.globalState
-  }
-
   async getActiveProfileId(): Promise<string | undefined> {
     const runtimeSession = await this.getRuntimeSession()
     return runtimeSession.kind === 'matchedProfile'
@@ -1109,7 +1108,6 @@ export class ProfileManager {
   }
 
   async setActiveProfileId(profileId: string | undefined): Promise<boolean> {
-    const bucket = this.getStateBucket()
     const prev = await this.getActiveProfileId()
 
     let authData: AuthData | null = null
@@ -1120,10 +1118,6 @@ export class ProfileManager {
         if (!authData) {
           return false
         }
-      }
-
-      if (!this.canWriteRuntimeAuth()) {
-        return false
       }
     }
 
@@ -1138,43 +1132,32 @@ export class ProfileManager {
         this.deleteSharedActiveProfile()
       }
     } else {
-      await bucket.update(ACTIVE_PROFILE_KEY, profileId)
-      await bucket.update(OLD_ACTIVE_PROFILE_KEY, undefined)
+      await this.writeLocalState(
+        ACTIVE_PROFILE_KEY,
+        OLD_ACTIVE_PROFILE_KEY,
+        profileId,
+      )
     }
 
     if (profileId && authData) {
-      // We already validated tokens above; avoid a second secret read.
-      if (!this.syncRuntimeAuth(authData, profileId)) {
-        return false
-      }
+      // The profile auth payload is already in memory here, so sync it
+      // directly instead of paying for another token lookup before writing the
+      // runtime auth file.
+      this.syncRuntimeAuth(authData, profileId)
     }
     return true
   }
 
   async getLastProfileId(): Promise<string | undefined> {
-    const bucket = this.getStateBucket()
-    const v = bucket.get<string>(LAST_PROFILE_KEY)
-    if (v) {
-      return v
-    }
-
-    const legacyBucket = this.getLegacyStateBucket()
-    const old =
-      bucket.get<string>(OLD_LAST_PROFILE_KEY) ||
-      legacyBucket.get<string>(OLD_LAST_PROFILE_KEY)
-    if (old) {
-      await bucket.update(LAST_PROFILE_KEY, old)
-      await bucket.update(OLD_LAST_PROFILE_KEY, undefined)
-      await legacyBucket.update(OLD_LAST_PROFILE_KEY, undefined)
-      return old
-    }
-    return undefined
+    return this.readMigratedLocalState(LAST_PROFILE_KEY, OLD_LAST_PROFILE_KEY)
   }
 
   private async setLastProfileId(profileId: string | undefined): Promise<void> {
-    const bucket = this.getStateBucket()
-    await bucket.update(LAST_PROFILE_KEY, profileId)
-    await bucket.update(OLD_LAST_PROFILE_KEY, undefined)
+    await this.writeLocalState(
+      LAST_PROFILE_KEY,
+      OLD_LAST_PROFILE_KEY,
+      profileId,
+    )
   }
 
   async toggleLastProfileId(): Promise<string | undefined> {

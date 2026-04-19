@@ -6,11 +6,7 @@
   "view.profiles.welcome": "No profiles to display yet.\n[Add from current auth.json](command:codex-switch.profile.addFromCodexAuthFile)\n[Import from file](command:codex-switch.profile.addFromFile)",
   "configuration.title": "Codex Switch",
   "configuration.debugLogging.description": "Enable verbose logging (never prints tokens)",
-  "configuration.activeProfileScope.description": "Where to store active profile selection",
   "configuration.storageMode.description": "Where profile credentials are stored. In auto mode, SSH remote sessions use a shared remote file store and local sessions use SecretStorage",
-  "configuration.runtimeIsolationMode.description": "How strictly Codex runtime auth should be isolated between VS Code windows and workspaces",
-  "configuration.runtimeIsolationMode.sharedRuntime": "Use the current VS Code runtime auth file as a shared source of truth across windows",
-  "configuration.runtimeIsolationMode.isolatedInstance": "Launch each workspace in a managed VS Code instance with its own CODEX_HOME and user-data directory",
   "configuration.reloadWindowAfterProfileSwitch.description": "Reload VS Code window after successful profile switch/import so Codex extension re-reads auth.json",
   "configuration.quotaRefreshInterval.description": "Automatic quota refresh interval for sidebar health data, in seconds",
   "configuration.autoRenewTokens.description": "Automatically renew saved profile tokens in the background",
@@ -39,6 +35,5 @@
   "command.profile.refreshAll.title": "Codex Switch: Refresh Profiles",
   "command.profile.expandAll.title": "Codex Switch: Expand All Profiles",
   "command.profile.copyValue.title": "Codex Switch: Copy Profile Value",
-  "command.reloadWindow.title": "Codex Switch: Reload Window",
-  "command.runtime.relaunchIsolatedWindow.title": "Codex Switch: Open Isolated Runtime Window"
+  "command.reloadWindow.title": "Codex Switch: Reload Window"
 }

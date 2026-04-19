@@ -1,5 +1,4 @@
 import * as vscode from 'vscode'
-import { spawn } from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
@@ -9,11 +8,6 @@ import {
   loadAuthDataFromFile,
   shouldUseWslAuthPath,
 } from '../auth/auth-manager'
-import {
-  buildIsolatedLaunchCommand,
-  ensureWorkspaceIsolationDirs,
-  getRuntimeIsolationMode,
-} from '../auth/runtime-isolation'
 import { pickBestQuotaProfileId } from '../health/profile-health'
 import { ProfileSummary, RuntimeSession } from '../types'
 import { RefreshCoordinator } from '../ui/refresh-coordinator'
@@ -105,11 +99,6 @@ function clearPendingStatusBarClick(): void {
 }
 
 async function maybeReloadWindowAfterProfileSwitch(): Promise<void> {
-  if (getRuntimeIsolationMode() === 'isolatedInstance') {
-    await vscode.commands.executeCommand('workbench.action.reloadWindow')
-    return
-  }
-
   const reloadAfterSwitch = vscode.workspace
     .getConfiguration('codexSwitch')
     .get<boolean>('reloadWindowAfterProfileSwitch', false)
@@ -214,75 +203,6 @@ function getRuntimeConflictMessage(
     : vscode.l10n.t(
         'Current runtime auth is an external auth.json session. Pick a saved profile to take over the runtime.',
       )
-}
-
-async function relaunchIntoManagedIsolation(
-  profileManager: ProfileManager,
-): Promise<void> {
-  const isolationStatus = profileManager.getRuntimeIsolationStatus()
-  if (isolationStatus.isManagedWindow && !isolationStatus.requiresRelaunch) {
-    void vscode.window.showInformationMessage(
-      vscode.l10n.t(
-        'This workspace is already running inside its managed isolated VS Code instance.',
-      ),
-    )
-    return
-  }
-
-  const descriptor = isolationStatus.descriptor
-  if (!descriptor) {
-    void vscode.window.showErrorMessage(
-      vscode.l10n.t(
-        'Unable to derive a managed isolation target for this window.',
-      ),
-    )
-    return
-  }
-
-  if (descriptor.launchTarget.kind === 'unsupported') {
-    void vscode.window.showErrorMessage(descriptor.launchTarget.reason)
-    return
-  }
-
-  const launchCommand = buildIsolatedLaunchCommand(descriptor)
-  if (!launchCommand) {
-    void vscode.window.showErrorMessage(
-      vscode.l10n.t(
-        'Unable to build an isolated VS Code launch command for this workspace.',
-      ),
-    )
-    return
-  }
-
-  ensureWorkspaceIsolationDirs(descriptor)
-
-  try {
-    const child = spawn(launchCommand.executable, launchCommand.args, {
-      detached: true,
-      env: launchCommand.env,
-      stdio: 'ignore',
-    })
-    child.unref()
-  } catch (error) {
-    const message =
-      error instanceof Error && error.message
-        ? error.message
-        : vscode.l10n.t('Unknown launch error.')
-    await vscode.env.clipboard.writeText(launchCommand.printableCommand)
-    void vscode.window.showErrorMessage(
-      vscode.l10n.t(
-        'Failed to launch the isolated VS Code instance: {0}. The launch command was copied to the clipboard.',
-        message,
-      ),
-    )
-    return
-  }
-
-  void vscode.window.showInformationMessage(
-    vscode.l10n.t(
-      'Launched an isolated VS Code instance for this workspace. Close the current window after the new instance opens.',
-    ),
-  )
 }
 
 async function afterProfileChange(
@@ -1023,13 +943,6 @@ export function registerCommands(
     },
   )
 
-  const relaunchIsolatedWindowCommand = vscode.commands.registerCommand(
-    'codex-switch.runtime.relaunchIsolatedWindow',
-    async () => {
-      await relaunchIntoManagedIsolation(profileManager)
-    },
-  )
-
   const manageProfilesCommand = vscode.commands.registerCommand(
     'codex-switch.profile.manage',
     async () => {
@@ -1071,10 +984,6 @@ export function registerCommands(
           {
             label: vscode.l10n.t('Import profiles...'),
             command: 'codex-switch.profile.importSettings',
-          },
-          {
-            label: vscode.l10n.t('Open isolated runtime window'),
-            command: 'codex-switch.runtime.relaunchIsolatedWindow',
           },
           ...(hasProfiles
             ? [
@@ -1119,6 +1028,5 @@ export function registerCommands(
     expandAllProfilesCommand,
     copyValueCommand,
     reloadWindowCommand,
-    relaunchIsolatedWindowCommand,
   )
 }

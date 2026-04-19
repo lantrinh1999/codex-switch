@@ -107,33 +107,13 @@ That runtime state is shown as one of:
 This avoids the old failure mode where the status bar showed one profile
 while Codex was actually using different auth from `auth.json`.
 
-## Shared Runtime Mode
+## Runtime Auth Behavior
 
-`codexSwitch.runtimeIsolationMode=sharedRuntime` is the default.
-In this mode, the current window uses the runtime auth file that VS Code
-already has access to, and that runtime file is the source of truth.
+The current VS Code window uses the runtime auth file that Codex already has
+access to, and that runtime file is the source of truth.
 
 In `remoteFiles` mode, `active-profile.json` is only an advisory marker.
 If `auth.json` and the marker disagree, `auth.json` wins.
-
-Because the runtime auth file is shared in this mode,
-`codexSwitch.activeProfileScope=workspace` is ignored and treated as global.
-
-## Isolated Instance Mode
-
-`codexSwitch.runtimeIsolationMode=isolatedInstance` enables true workspace
-isolation.
-
-In this mode, each workspace is reopened in a managed VS Code instance with:
-
-* its own `CODEX_HOME`
-* its own `--user-data-dir`
-* its own runtime `auth.json`
-
-Use the `Open isolated runtime window` command to launch that managed instance.
-Profile switching in isolated mode is blocked until the workspace is running
-inside its managed instance, which prevents one window from silently
-overwriting another window's runtime auth.
 
 ## Recovery
 
@@ -149,19 +129,13 @@ the extension offers recovery options:
 Main settings:
 
 * `codexSwitch.debugLogging`
-* `codexSwitch.activeProfileScope` (`global` or `workspace`)
 * `codexSwitch.storageMode` (`auto`, `secretStorage`, `remoteFiles`)
-* `codexSwitch.runtimeIsolationMode` (`sharedRuntime` or `isolatedInstance`)
 * `codexSwitch.reloadWindowAfterProfileSwitch`
 * `codexSwitch.statusBarClickBehavior` (`cycle`, `toggleLast`, or `bestQuota`)
 * `codexSwitch.statusBarSwitchTrigger` (`click` or `doubleClick`)
 * `codexSwitch.autoRenewTokens`
 * `codexSwitch.tokenAutoRenewIntervalMinutes`
 * `codexSwitch.quotaRefreshInterval`
-
-`activeProfileScope=workspace` only affects saved selection state while
-`runtimeIsolationMode=isolatedInstance`.
-In shared runtime mode, runtime auth is global to the active VS Code instance.
 
 The profiles sidebar starts collapsed by default and keeps your expand/collapse
 state while health data refreshes. Token auto-renew runs independently from
