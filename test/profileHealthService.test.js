@@ -64,8 +64,7 @@ function createVscodeMock(options = {}) {
       typeof options.autoRenewTokens === 'boolean'
         ? options.autoRenewTokens
         : true,
-    tokenAutoRenewIntervalMinutes:
-      options.tokenAutoRenewIntervalMinutes ?? 60,
+    tokenAutoRenewIntervalMinutes: options.tokenAutoRenewIntervalMinutes ?? 60,
   }
 
   const listeners = new Set()

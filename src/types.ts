@@ -14,6 +14,8 @@ export interface AuthData {
 }
 
 export type StorageMode = 'auto' | 'secretStorage' | 'remoteFiles'
+export type RuntimeIsolationMode = 'sharedRuntime' | 'isolatedInstance'
+export type RuntimeSessionKind = 'matchedProfile' | 'externalAuth' | 'noAuth'
 
 export interface ProfileSummary {
   id: string
@@ -82,4 +84,54 @@ export interface ProfileHealthState {
   quotaErrorMessage?: string
   tokenRefreshInProgress: boolean
   updatedAt: number | null
+}
+
+export interface RuntimeSession {
+  kind: RuntimeSessionKind
+  authPath: string
+  authData: AuthData | null
+  matchedProfileId?: string
+  warningMessage?: string
+}
+
+export type WorkspaceLaunchTarget =
+  | {
+      kind: 'emptyWindow'
+    }
+  | {
+      kind: 'localPaths'
+      paths: string[]
+    }
+  | {
+      kind: 'remotePath'
+      authority: string
+      path: string
+    }
+  | {
+      kind: 'unsupported'
+      reason: string
+    }
+
+export interface WorkspaceIsolationDescriptor {
+  workspaceKey: string
+  workspaceLabel: string
+  baseDir: string
+  userDataDir: string
+  codexHome: string
+  launchTarget: WorkspaceLaunchTarget
+}
+
+export interface RuntimeIsolationStatus {
+  mode: RuntimeIsolationMode
+  descriptor: WorkspaceIsolationDescriptor | null
+  isManagedWindow: boolean
+  requiresRelaunch: boolean
+  warningMessage?: string
+}
+
+export interface IsolatedLaunchCommand {
+  executable: string
+  args: string[]
+  env: Record<string, string | undefined>
+  printableCommand: string
 }

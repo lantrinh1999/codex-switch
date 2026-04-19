@@ -40,6 +40,7 @@ test('profiles sidebar view title exposes the expected commands', () => {
   assert.deepEqual(commands, [
     'codex-switch.profile.manage',
     'codex-switch.reloadWindow',
+    'codex-switch.runtime.relaunchIsolatedWindow',
     'codex-switch.profile.addFromFile',
     'codex-switch.profile.addFromCodexAuthFile',
     'codex-switch.profile.refreshAll',
@@ -52,6 +53,7 @@ test('profiles sidebar commands use native action icons', () => {
   const expectedIcons = new Map([
     ['codex-switch.profile.manage', '$(settings-gear)'],
     ['codex-switch.reloadWindow', '$(debug-restart)'],
+    ['codex-switch.runtime.relaunchIsolatedWindow', '$(launch)'],
     ['codex-switch.profile.addFromFile', '$(folder-opened)'],
     ['codex-switch.profile.addFromCodexAuthFile', '$(add)'],
     ['codex-switch.profile.refreshAll', '$(refresh)'],
@@ -142,8 +144,24 @@ test('token auto-renew settings are contributed', () => {
   assert.equal(intervalSetting?.minimum, 5)
 })
 
+test('runtime isolation mode setting is contributed', () => {
+  const setting =
+    manifest.contributes.configuration.properties[
+      'codexSwitch.runtimeIsolationMode'
+    ]
+
+  assert.deepEqual(setting?.enum, ['sharedRuntime', 'isolatedInstance'])
+  assert.equal(setting?.default, 'sharedRuntime')
+  assert.equal(
+    setting?.enumDescriptions?.[1],
+    '%configuration.runtimeIsolationMode.isolatedInstance%',
+  )
+})
+
 test('renew token command keeps the existing command id', () => {
-  const contribution = getCommandContribution('codex-switch.profile.refreshToken')
+  const contribution = getCommandContribution(
+    'codex-switch.profile.refreshToken',
+  )
 
   assert.equal(contribution?.title, '%command.profile.refreshToken.title%')
   assert.equal(contribution?.icon, '$(refresh)')

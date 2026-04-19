@@ -46,6 +46,11 @@ After a successful switch,
 Codex Switch writes the chosen auth data into the active auth file,
 so CLI and extension state stay aligned.
 
+Runtime auth is authoritative.
+If `auth.json` changes outside the extension and no saved profile matches it,
+the UI shows an external runtime session instead of pretending a saved profile
+is still active.
+
 ## Auth File Resolution
 
 By default, auth is resolved as `<CODEX_HOME>/auth.json`.
@@ -90,15 +95,45 @@ In `secretStorage` mode, profile metadata is still stored in a local
 `profiles.json` file under VS Code global storage,
 while credentials stay in SecretStorage.
 
-## SSH Shared Mode
+## Runtime Truth
 
-In `remoteFiles` mode, active state is reconciled from both
-`~/.codex/auth.json` and `active-profile.json`.
-If current auth clearly matches a saved profile,
-that match wins and the shared active marker is updated.
+The extension reconciles the current runtime auth file on every refresh.
+That runtime state is shown as one of:
 
-This keeps multiple clients in sync when one client switches profiles,
-runs `codex login`, or writes `auth.json` directly.
+* a saved profile match,
+* an external/unsaved auth session,
+* or no runtime auth.
+
+This avoids the old failure mode where the status bar showed one profile
+while Codex was actually using different auth from `auth.json`.
+
+## Shared Runtime Mode
+
+`codexSwitch.runtimeIsolationMode=sharedRuntime` is the default.
+In this mode, the current window uses the runtime auth file that VS Code
+already has access to, and that runtime file is the source of truth.
+
+In `remoteFiles` mode, `active-profile.json` is only an advisory marker.
+If `auth.json` and the marker disagree, `auth.json` wins.
+
+Because the runtime auth file is shared in this mode,
+`codexSwitch.activeProfileScope=workspace` is ignored and treated as global.
+
+## Isolated Instance Mode
+
+`codexSwitch.runtimeIsolationMode=isolatedInstance` enables true workspace
+isolation.
+
+In this mode, each workspace is reopened in a managed VS Code instance with:
+
+* its own `CODEX_HOME`
+* its own `--user-data-dir`
+* its own runtime `auth.json`
+
+Use the `Open isolated runtime window` command to launch that managed instance.
+Profile switching in isolated mode is blocked until the workspace is running
+inside its managed instance, which prevents one window from silently
+overwriting another window's runtime auth.
 
 ## Recovery
 
@@ -116,12 +151,17 @@ Main settings:
 * `codexSwitch.debugLogging`
 * `codexSwitch.activeProfileScope` (`global` or `workspace`)
 * `codexSwitch.storageMode` (`auto`, `secretStorage`, `remoteFiles`)
+* `codexSwitch.runtimeIsolationMode` (`sharedRuntime` or `isolatedInstance`)
 * `codexSwitch.reloadWindowAfterProfileSwitch`
 * `codexSwitch.statusBarClickBehavior` (`cycle`, `toggleLast`, or `bestQuota`)
 * `codexSwitch.statusBarSwitchTrigger` (`click` or `doubleClick`)
 * `codexSwitch.autoRenewTokens`
 * `codexSwitch.tokenAutoRenewIntervalMinutes`
 * `codexSwitch.quotaRefreshInterval`
+
+`activeProfileScope=workspace` only affects saved selection state while
+`runtimeIsolationMode=isolatedInstance`.
+In shared runtime mode, runtime auth is global to the active VS Code instance.
 
 The profiles sidebar starts collapsed by default and keeps your expand/collapse
 state while health data refreshes. Token auto-renew runs independently from

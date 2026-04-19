@@ -28,14 +28,20 @@ test('shared profile renew leases block concurrent owners until released', () =>
     sharedStore.ensureSharedStoreDirs()
 
     const leasePath = sharedStore.getSharedProfileRenewLeasePath('profile-1')
-    assert.equal(sharedStore.acquireJsonLease(leasePath, 'owner-a', 60000), true)
+    assert.equal(
+      sharedStore.acquireJsonLease(leasePath, 'owner-a', 60000),
+      true,
+    )
     assert.equal(
       sharedStore.acquireJsonLease(leasePath, 'owner-b', 60000),
       false,
     )
 
     sharedStore.releaseJsonLease(leasePath, 'owner-a')
-    assert.equal(sharedStore.acquireJsonLease(leasePath, 'owner-b', 60000), true)
+    assert.equal(
+      sharedStore.acquireJsonLease(leasePath, 'owner-b', 60000),
+      true,
+    )
   })
 })
 

@@ -80,10 +80,7 @@ function createVscodeMock(options = {}) {
             if (section === 'codexSwitch' && key === 'statusBarClickBehavior') {
               return options.statusBarClickBehavior ?? 'cycle'
             }
-            if (
-              section === 'codexSwitch' &&
-              key === 'statusBarSwitchTrigger'
-            ) {
+            if (section === 'codexSwitch' && key === 'statusBarSwitchTrigger') {
               return options.statusBarSwitchTrigger ?? 'click'
             }
             if (
@@ -665,7 +662,9 @@ test('renew token command falls back to the picker when no target is provided', 
       },
     })
 
-    await vscodeMock.commands.executeCommand('codex-switch.profile.refreshToken')
+    await vscodeMock.commands.executeCommand(
+      'codex-switch.profile.refreshToken',
+    )
 
     assert.deepEqual(calls, [
       ['renew', 'profile-picked'],

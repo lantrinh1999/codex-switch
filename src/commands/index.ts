@@ -1,4 +1,5 @@
 import * as vscode from 'vscode'
+import { spawn } from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
@@ -8,8 +9,13 @@ import {
   loadAuthDataFromFile,
   shouldUseWslAuthPath,
 } from '../auth/auth-manager'
+import {
+  buildIsolatedLaunchCommand,
+  ensureWorkspaceIsolationDirs,
+  getRuntimeIsolationMode,
+} from '../auth/runtime-isolation'
 import { pickBestQuotaProfileId } from '../health/profile-health'
-import { ProfileSummary } from '../types'
+import { ProfileSummary, RuntimeSession } from '../types'
 import { RefreshCoordinator } from '../ui/refresh-coordinator'
 import { ProfileTreeNode, ProfileTreeProvider } from '../ui/profile-tree'
 
@@ -23,6 +29,7 @@ let pendingStatusBarClickTimer: ReturnType<typeof setTimeout> | undefined
 
 interface ProfileQuickPickItem extends vscode.QuickPickItem {
   profileId: string
+  isInfoItem?: boolean
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -98,6 +105,11 @@ function clearPendingStatusBarClick(): void {
 }
 
 async function maybeReloadWindowAfterProfileSwitch(): Promise<void> {
+  if (getRuntimeIsolationMode() === 'isolatedInstance') {
+    await vscode.commands.executeCommand('workbench.action.reloadWindow')
+    return
+  }
+
   const reloadAfterSwitch = vscode.workspace
     .getConfiguration('codexSwitch')
     .get<boolean>('reloadWindowAfterProfileSwitch', false)
@@ -111,14 +123,43 @@ async function getProfileQuickPickItems(
   profileManager: ProfileManager,
 ): Promise<ProfileQuickPickItem[]> {
   const profiles = await profileManager.listProfiles()
-  const activeId = await profileManager.getActiveProfileId()
-  return profiles.map((profile) => ({
+  const runtimeSession = await profileManager.getRuntimeSession(profiles)
+  const items: ProfileQuickPickItem[] = profiles.map((profile) => ({
     label: profile.name,
     description:
       profile.email && profile.email !== 'Unknown' ? profile.email : undefined,
-    detail: profile.id === activeId ? vscode.l10n.t('Active') : undefined,
+    detail:
+      runtimeSession.kind === 'matchedProfile' &&
+      profile.id === runtimeSession.matchedProfileId
+        ? vscode.l10n.t('Runtime active')
+        : undefined,
     profileId: profile.id,
   }))
+
+  if (runtimeSession.kind === 'externalAuth') {
+    items.unshift({
+      label: vscode.l10n.t('Current runtime auth'),
+      description:
+        runtimeSession.authData?.email &&
+        runtimeSession.authData.email !== 'Unknown'
+          ? runtimeSession.authData.email
+          : undefined,
+      detail: vscode.l10n.t('External auth.json session is active'),
+      profileId: '__runtime_external__',
+      isInfoItem: true,
+      alwaysShow: true,
+    })
+  } else if (runtimeSession.kind === 'noAuth') {
+    items.unshift({
+      label: vscode.l10n.t('Current runtime auth'),
+      detail: vscode.l10n.t('No auth.json session is active'),
+      profileId: '__runtime_none__',
+      isInfoItem: true,
+      alwaysShow: true,
+    })
+  }
+
+  return items
 }
 
 async function pickProfile(
@@ -146,7 +187,102 @@ async function pickProfile(
     return undefined
   }
 
-  return vscode.window.showQuickPick(items, { placeHolder })
+  const picked = await vscode.window.showQuickPick(items, { placeHolder })
+  if (!picked || picked.isInfoItem) {
+    return undefined
+  }
+
+  return picked
+}
+
+async function getRuntimeSession(
+  profileManager: ProfileManager,
+): Promise<RuntimeSession> {
+  const profiles = await profileManager.listProfiles()
+  return profileManager.getRuntimeSession(profiles)
+}
+
+function getRuntimeConflictMessage(
+  runtimeSession: RuntimeSession,
+): string | null {
+  if (runtimeSession.kind !== 'externalAuth') {
+    return null
+  }
+
+  return runtimeSession.warningMessage
+    ? runtimeSession.warningMessage
+    : vscode.l10n.t(
+        'Current runtime auth is an external auth.json session. Pick a saved profile to take over the runtime.',
+      )
+}
+
+async function relaunchIntoManagedIsolation(
+  profileManager: ProfileManager,
+): Promise<void> {
+  const isolationStatus = profileManager.getRuntimeIsolationStatus()
+  if (isolationStatus.isManagedWindow && !isolationStatus.requiresRelaunch) {
+    void vscode.window.showInformationMessage(
+      vscode.l10n.t(
+        'This workspace is already running inside its managed isolated VS Code instance.',
+      ),
+    )
+    return
+  }
+
+  const descriptor = isolationStatus.descriptor
+  if (!descriptor) {
+    void vscode.window.showErrorMessage(
+      vscode.l10n.t(
+        'Unable to derive a managed isolation target for this window.',
+      ),
+    )
+    return
+  }
+
+  if (descriptor.launchTarget.kind === 'unsupported') {
+    void vscode.window.showErrorMessage(descriptor.launchTarget.reason)
+    return
+  }
+
+  const launchCommand = buildIsolatedLaunchCommand(descriptor)
+  if (!launchCommand) {
+    void vscode.window.showErrorMessage(
+      vscode.l10n.t(
+        'Unable to build an isolated VS Code launch command for this workspace.',
+      ),
+    )
+    return
+  }
+
+  ensureWorkspaceIsolationDirs(descriptor)
+
+  try {
+    const child = spawn(launchCommand.executable, launchCommand.args, {
+      detached: true,
+      env: launchCommand.env,
+      stdio: 'ignore',
+    })
+    child.unref()
+  } catch (error) {
+    const message =
+      error instanceof Error && error.message
+        ? error.message
+        : vscode.l10n.t('Unknown launch error.')
+    await vscode.env.clipboard.writeText(launchCommand.printableCommand)
+    void vscode.window.showErrorMessage(
+      vscode.l10n.t(
+        'Failed to launch the isolated VS Code instance: {0}. The launch command was copied to the clipboard.',
+        message,
+      ),
+    )
+    return
+  }
+
+  void vscode.window.showInformationMessage(
+    vscode.l10n.t(
+      'Launched an isolated VS Code instance for this workspace. Close the current window after the new instance opens.',
+    ),
+  )
 }
 
 async function afterProfileChange(
@@ -262,7 +398,7 @@ export function registerCommands(
       const pick = await vscode.window.showQuickPick(items, {
         placeHolder: vscode.l10n.t('Switch profile'),
       })
-      if (!pick) {
+      if (!pick || pick.isInfoItem) {
         return
       }
 
@@ -290,6 +426,14 @@ export function registerCommands(
   const toggleLastProfileCommand = vscode.commands.registerCommand(
     'codex-switch.profile.toggleLast',
     async () => {
+      const runtimeSession = await getRuntimeSession(profileManager)
+      const runtimeConflictMessage = getRuntimeConflictMessage(runtimeSession)
+      if (runtimeConflictMessage) {
+        void vscode.window.showWarningMessage(runtimeConflictMessage)
+        await vscode.commands.executeCommand('codex-switch.profile.switch')
+        return
+      }
+
       const behavior = getStatusBarClickBehavior()
       if (behavior === 'toggleLast') {
         const newId = await profileManager.toggleLastProfileId()
@@ -422,7 +566,10 @@ export function registerCommands(
         }
 
         await profileManager.replaceProfileAuth(existing.id, authData)
-        await profileManager.setActiveProfileId(existing.id)
+        const activated = await profileManager.setActiveProfileId(existing.id)
+        if (!activated) {
+          return
+        }
         await afterProfileChange(refreshCoordinator, existing.id)
         showActionInformationMessage(
           vscode.l10n.t(
@@ -450,7 +597,10 @@ export function registerCommands(
       }
 
       const profile = await profileManager.createProfile(name, authData)
-      await profileManager.setActiveProfileId(profile.id)
+      const activated = await profileManager.setActiveProfileId(profile.id)
+      if (!activated) {
+        return
+      }
       await afterProfileChange(refreshCoordinator, profile.id)
       showActionInformationMessage(
         vscode.l10n.t(
@@ -603,7 +753,10 @@ export function registerCommands(
         }
 
         await profileManager.replaceProfileAuth(existing.id, authData)
-        await profileManager.setActiveProfileId(existing.id)
+        const activated = await profileManager.setActiveProfileId(existing.id)
+        if (!activated) {
+          return
+        }
         await afterProfileChange(refreshCoordinator, existing.id)
         showActionInformationMessage(
           vscode.l10n.t(
@@ -629,7 +782,10 @@ export function registerCommands(
       }
 
       const profile = await profileManager.createProfile(name, authData)
-      await profileManager.setActiveProfileId(profile.id)
+      const activated = await profileManager.setActiveProfileId(profile.id)
+      if (!activated) {
+        return
+      }
       await afterProfileChange(refreshCoordinator, profile.id)
       showActionInformationMessage(
         vscode.l10n.t(
@@ -867,6 +1023,13 @@ export function registerCommands(
     },
   )
 
+  const relaunchIsolatedWindowCommand = vscode.commands.registerCommand(
+    'codex-switch.runtime.relaunchIsolatedWindow',
+    async () => {
+      await relaunchIntoManagedIsolation(profileManager)
+    },
+  )
+
   const manageProfilesCommand = vscode.commands.registerCommand(
     'codex-switch.profile.manage',
     async () => {
@@ -908,6 +1071,10 @@ export function registerCommands(
           {
             label: vscode.l10n.t('Import profiles...'),
             command: 'codex-switch.profile.importSettings',
+          },
+          {
+            label: vscode.l10n.t('Open isolated runtime window'),
+            command: 'codex-switch.runtime.relaunchIsolatedWindow',
           },
           ...(hasProfiles
             ? [
@@ -952,5 +1119,6 @@ export function registerCommands(
     expandAllProfilesCommand,
     copyValueCommand,
     reloadWindowCommand,
+    relaunchIsolatedWindowCommand,
   )
 }

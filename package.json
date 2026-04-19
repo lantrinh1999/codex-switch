@@ -7,7 +7,7 @@
   },
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "2.0.0",
+  "version": "3.0.120",
   "license": "MIT",
   "publisher": "woozy-masta",
   "files": [
@@ -182,6 +182,12 @@
         "title": "%command.reloadWindow.title%",
         "category": "Codex Switch",
         "icon": "$(debug-restart)"
+      },
+      {
+        "command": "codex-switch.runtime.relaunchIsolatedWindow",
+        "title": "%command.runtime.relaunchIsolatedWindow.title%",
+        "category": "Codex Switch",
+        "icon": "$(launch)"
       }
     ],
     "menus": {
@@ -197,29 +203,34 @@
           "group": "navigation@2"
         },
         {
-          "command": "codex-switch.profile.addFromFile",
+          "command": "codex-switch.runtime.relaunchIsolatedWindow",
           "when": "view == codexSwitchProfiles",
           "group": "navigation@3"
         },
         {
-          "command": "codex-switch.profile.addFromCodexAuthFile",
+          "command": "codex-switch.profile.addFromFile",
           "when": "view == codexSwitchProfiles",
           "group": "navigation@4"
         },
         {
-          "command": "codex-switch.profile.refreshAll",
+          "command": "codex-switch.profile.addFromCodexAuthFile",
           "when": "view == codexSwitchProfiles",
           "group": "navigation@5"
         },
         {
-          "command": "codex-switch.profile.expandAll",
+          "command": "codex-switch.profile.refreshAll",
           "when": "view == codexSwitchProfiles",
           "group": "navigation@6"
         },
         {
-          "command": "codex-switch.profile.exportSettings",
+          "command": "codex-switch.profile.expandAll",
           "when": "view == codexSwitchProfiles",
           "group": "navigation@7"
+        },
+        {
+          "command": "codex-switch.profile.exportSettings",
+          "when": "view == codexSwitchProfiles",
+          "group": "navigation@8"
         }
       ],
       "view/item/context": [
@@ -293,6 +304,19 @@
           ],
           "default": "auto",
           "description": "%configuration.storageMode.description%"
+        },
+        "codexSwitch.runtimeIsolationMode": {
+          "type": "string",
+          "enum": [
+            "sharedRuntime",
+            "isolatedInstance"
+          ],
+          "default": "sharedRuntime",
+          "description": "%configuration.runtimeIsolationMode.description%",
+          "enumDescriptions": [
+            "%configuration.runtimeIsolationMode.sharedRuntime%",
+            "%configuration.runtimeIsolationMode.isolatedInstance%"
+          ]
         },
         "codexSwitch.reloadWindowAfterProfileSwitch": {
           "type": "boolean",

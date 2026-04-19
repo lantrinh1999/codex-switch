@@ -3,9 +3,19 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { randomUUID } from 'crypto'
-import { AuthData, ProfileSummary, StorageMode } from '../types'
+import {
+  AuthData,
+  ProfileSummary,
+  RuntimeIsolationStatus,
+  RuntimeSession,
+  StorageMode,
+} from '../types'
 import { getDefaultCodexAuthPath, loadAuthDataFromFile } from './auth-manager'
 import { syncCodexAuthFile } from './codex-auth-sync'
+import {
+  getEffectiveActiveProfileScope,
+  getRuntimeIsolationStatus as resolveRuntimeIsolationStatus,
+} from './runtime-isolation'
 import {
   acquireJsonLease,
   SharedActiveProfile,
@@ -336,6 +346,175 @@ export class ProfileManager {
     deleteFileIfExists(getSharedActiveProfilePath())
   }
 
+  getRuntimeIsolationStatus(): RuntimeIsolationStatus {
+    return resolveRuntimeIsolationStatus()
+  }
+
+  private canWriteRuntimeAuth(interactive = true): boolean {
+    const status = this.getRuntimeIsolationStatus()
+    if (!status.requiresRelaunch && !status.warningMessage) {
+      return true
+    }
+
+    if (!interactive) {
+      return false
+    }
+
+    const message =
+      status.warningMessage ||
+      vscode.l10n.t(
+        'This window is not ready to write the managed runtime auth file.',
+      )
+    void vscode.window.showWarningMessage(message)
+    return false
+  }
+
+  private syncRuntimeAuth(authData: AuthData, profileId: string): boolean {
+    if (!this.canWriteRuntimeAuth()) {
+      return false
+    }
+
+    syncCodexAuthFile(getDefaultCodexAuthPath(), authData)
+    this.lastSyncedProfileId = profileId
+    return true
+  }
+
+  private async getPersistedActiveProfileId(): Promise<string | undefined> {
+    if (this.isRemoteFilesMode()) {
+      return this.readSharedActiveProfile()?.profileId
+    }
+
+    const bucket = this.getStateBucket()
+    const next = bucket.get<string>(ACTIVE_PROFILE_KEY)
+    if (next) {
+      return next
+    }
+
+    // Keep the migration lazy so the extension does not rewrite state until a
+    // real read happens. This avoids touching workspace/global mementos on
+    // startup when the user never used the old key.
+    const legacyBucket = this.getLegacyStateBucket()
+    const legacy =
+      bucket.get<string>(OLD_ACTIVE_PROFILE_KEY) ||
+      legacyBucket.get<string>(OLD_ACTIVE_PROFILE_KEY)
+    if (!legacy) {
+      return undefined
+    }
+
+    await bucket.update(ACTIVE_PROFILE_KEY, legacy)
+    await bucket.update(OLD_ACTIVE_PROFILE_KEY, undefined)
+    await legacyBucket.update(OLD_ACTIVE_PROFILE_KEY, undefined)
+    return legacy
+  }
+
+  private buildRuntimeWarningMessage(
+    profiles: ProfileSummary[],
+    persistedActiveProfileId: string | undefined,
+    runtimeState: RuntimeSession['kind'],
+    matchedProfileId?: string,
+  ): string | undefined {
+    const persistedProfile = persistedActiveProfileId
+      ? profiles.find((profile) => profile.id === persistedActiveProfileId)
+      : undefined
+
+    if (runtimeState === 'matchedProfile') {
+      if (
+        persistedProfile &&
+        matchedProfileId &&
+        persistedProfile.id !== matchedProfileId
+      ) {
+        const runtimeProfile = profiles.find(
+          (profile) => profile.id === matchedProfileId,
+        )
+        return vscode.l10n.t(
+          'Runtime auth currently matches "{0}", but the saved active selection still points to "{1}".',
+          runtimeProfile?.name || matchedProfileId,
+          persistedProfile.name,
+        )
+      }
+      return undefined
+    }
+
+    if (runtimeState === 'externalAuth') {
+      if (persistedProfile) {
+        return vscode.l10n.t(
+          'Runtime auth does not match the saved active profile "{0}". Codex is using an external auth.json session.',
+          persistedProfile.name,
+        )
+      }
+      return vscode.l10n.t(
+        'Codex is currently using auth.json data that is not saved as a profile.',
+      )
+    }
+
+    if (persistedProfile) {
+      return vscode.l10n.t(
+        'Saved active profile "{0}" exists, but the runtime auth.json file is missing or invalid.',
+        persistedProfile.name,
+      )
+    }
+
+    return undefined
+  }
+
+  async getRuntimeSession(
+    profiles?: ProfileSummary[],
+  ): Promise<RuntimeSession> {
+    const resolvedProfiles = profiles || (await this.listProfiles())
+    const authPath = getDefaultCodexAuthPath()
+    const authData = await loadAuthDataFromFile(authPath)
+    const persistedActiveProfileId = await this.getPersistedActiveProfileId()
+
+    if (authData) {
+      const match = resolvedProfiles.find((profile) =>
+        this.matchesAuth(profile, authData),
+      )
+      if (match) {
+        if (this.isRemoteFilesMode()) {
+          const sharedActiveProfile = this.readSharedActiveProfile()
+          if (sharedActiveProfile?.profileId !== match.id) {
+            this.writeSharedActiveProfile(match.id)
+          }
+        }
+
+        return {
+          kind: 'matchedProfile',
+          authPath,
+          authData,
+          matchedProfileId: match.id,
+          warningMessage: this.buildRuntimeWarningMessage(
+            resolvedProfiles,
+            persistedActiveProfileId,
+            'matchedProfile',
+            match.id,
+          ),
+        }
+      }
+
+      return {
+        kind: 'externalAuth',
+        authPath,
+        authData,
+        warningMessage: this.buildRuntimeWarningMessage(
+          resolvedProfiles,
+          persistedActiveProfileId,
+          'externalAuth',
+        ),
+      }
+    }
+
+    return {
+      kind: 'noAuth',
+      authPath,
+      authData: null,
+      warningMessage: this.buildRuntimeWarningMessage(
+        resolvedProfiles,
+        persistedActiveProfileId,
+        'noAuth',
+      ),
+    }
+  }
+
   private readRemoteProfileTokens(profileId: string): ProfileTokens | null {
     return readJsonFile<ProfileTokens>(getSharedProfileSecretsPath(profileId))
   }
@@ -493,7 +672,7 @@ export class ProfileManager {
     skipped: number
   }> {
     const profiles = await this.listProfiles()
-    const activeProfileId = await this.getActiveProfileId()
+    const activeProfileId = await this.getPersistedActiveProfileId()
     const lastProfileId = await this.getLastProfileId()
 
     const exportedProfiles: ExportedProfileEntryV1[] = []
@@ -644,19 +823,6 @@ export class ProfileManager {
     return { created, updated, skipped }
   }
 
-  private async inferActiveProfileIdFromAuthFile(): Promise<
-    string | undefined
-  > {
-    const authData = await loadAuthDataFromFile(getDefaultCodexAuthPath())
-    if (!authData) {
-      return undefined
-    }
-
-    const file = await this.readProfilesFile()
-    const match = file.profiles.find((p) => this.matchesAuth(p, authData))
-    return match?.id
-  }
-
   async findDuplicateProfile(
     authData: AuthData,
   ): Promise<ProfileSummary | undefined> {
@@ -771,26 +937,15 @@ export class ProfileManager {
       return true
     }
 
-    syncCodexAuthFile(getDefaultCodexAuthPath(), authData)
-    this.lastSyncedProfileId = profileId
+    // Token rotation should keep the runtime file aligned only when the
+    // current window is actually allowed to own that runtime file. In isolated
+    // mode we intentionally avoid overwriting shared auth when the relaunch
+    // requirement has not been satisfied yet.
+    if (this.canWriteRuntimeAuth(false)) {
+      syncCodexAuthFile(getDefaultCodexAuthPath(), authData)
+      this.lastSyncedProfileId = profileId
+    }
     return true
-  }
-
-  private async maybeSyncToCodexAuthFile(profileId: string): Promise<void> {
-    if (!profileId) {
-      return
-    }
-    if (this.lastSyncedProfileId === profileId) {
-      return
-    }
-
-    const authData = await this.loadAuthData(profileId)
-    if (!authData) {
-      return
-    }
-
-    syncCodexAuthFile(getDefaultCodexAuthPath(), authData)
-    this.lastSyncedProfileId = profileId
   }
 
   async createProfile(
@@ -858,7 +1013,7 @@ export class ProfileManager {
     await this.deleteStoredTokens(profileId)
 
     // Clean up active/last if they point to deleted profile.
-    const active = await this.getActiveProfileId()
+    const active = await this.getPersistedActiveProfileId()
     const last = await this.getLastProfileId()
     if (active === profileId) {
       await this.setActiveProfileId(undefined)
@@ -932,16 +1087,7 @@ export class ProfileManager {
   }
 
   private getStateBucket(): vscode.Memento {
-    const newCfg = vscode.workspace.getConfiguration('codexSwitch')
-    const scopeFromNew = newCfg.get<'global' | 'workspace'>(
-      'activeProfileScope',
-    )
-    const scope =
-      scopeFromNew ||
-      vscode.workspace
-        .getConfiguration('codexUsage')
-        .get<'global' | 'workspace'>('activeProfileScope', 'global')
-    return scope === 'workspace'
+    return getEffectiveActiveProfileScope() === 'workspace'
       ? this.context.workspaceState
       : this.context.globalState
   }
@@ -956,46 +1102,15 @@ export class ProfileManager {
   }
 
   async getActiveProfileId(): Promise<string | undefined> {
-    if (this.isRemoteFilesMode()) {
-      const explicit = this.readSharedActiveProfile()?.profileId
-      const inferred = await this.inferActiveProfileIdFromAuthFile()
-
-      if (inferred) {
-        if (explicit !== inferred) {
-          this.writeSharedActiveProfile(inferred)
-        }
-        return inferred
-      }
-
-      return explicit
-    }
-
-    const bucket = this.getStateBucket()
-    const v = bucket.get<string>(ACTIVE_PROFILE_KEY)
-    if (v) {
-      return v
-    }
-
-    // Migrate old key lazily.
-    const legacyBucket = this.getLegacyStateBucket()
-    const old =
-      bucket.get<string>(OLD_ACTIVE_PROFILE_KEY) ||
-      legacyBucket.get<string>(OLD_ACTIVE_PROFILE_KEY)
-    if (old) {
-      await bucket.update(ACTIVE_PROFILE_KEY, old)
-      await bucket.update(OLD_ACTIVE_PROFILE_KEY, undefined)
-      await legacyBucket.update(OLD_ACTIVE_PROFILE_KEY, undefined)
-      return old
-    }
-    return undefined
+    const runtimeSession = await this.getRuntimeSession()
+    return runtimeSession.kind === 'matchedProfile'
+      ? runtimeSession.matchedProfileId
+      : undefined
   }
 
   async setActiveProfileId(profileId: string | undefined): Promise<boolean> {
     const bucket = this.getStateBucket()
-    const prev = this.isRemoteFilesMode()
-      ? await this.getActiveProfileId()
-      : bucket.get<string>(ACTIVE_PROFILE_KEY) ||
-        bucket.get<string>(OLD_ACTIVE_PROFILE_KEY)
+    const prev = await this.getActiveProfileId()
 
     let authData: AuthData | null = null
     if (profileId) {
@@ -1005,6 +1120,10 @@ export class ProfileManager {
         if (!authData) {
           return false
         }
+      }
+
+      if (!this.canWriteRuntimeAuth()) {
+        return false
       }
     }
 
@@ -1025,8 +1144,9 @@ export class ProfileManager {
 
     if (profileId && authData) {
       // We already validated tokens above; avoid a second secret read.
-      syncCodexAuthFile(getDefaultCodexAuthPath(), authData)
-      this.lastSyncedProfileId = profileId
+      if (!this.syncRuntimeAuth(authData, profileId)) {
+        return false
+      }
     }
     return true
   }
@@ -1070,14 +1190,6 @@ export class ProfileManager {
       await this.setLastProfileId(active)
     }
     return ok ? last : undefined
-  }
-
-  async syncActiveProfileToCodexAuthFile(): Promise<void> {
-    const active = await this.getActiveProfileId()
-    if (!active) {
-      return
-    }
-    await this.maybeSyncToCodexAuthFile(active)
   }
 
   createWatchers(onChanged: () => void): vscode.Disposable[] {

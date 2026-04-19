@@ -38,7 +38,10 @@ function getComparableLastRefresh(
 
 function sameAuth(
   left: Pick<AuthData, 'idToken' | 'accessToken' | 'refreshToken' | 'authJson'>,
-  right: Pick<AuthData, 'idToken' | 'accessToken' | 'refreshToken' | 'authJson'>,
+  right: Pick<
+    AuthData,
+    'idToken' | 'accessToken' | 'refreshToken' | 'authJson'
+  >,
 ): boolean {
   return (
     left.idToken === right.idToken &&
@@ -295,10 +298,7 @@ export class ProfileHealthService implements vscode.Disposable {
 
         if (
           automatic &&
-          !isTokenRenewDue(
-            authData,
-            this.getTokenAutoRenewIntervalMinutes(),
-          )
+          !isTokenRenewDue(authData, this.getTokenAutoRenewIntervalMinutes())
         ) {
           return {
             skipped: true,
@@ -368,8 +368,7 @@ export class ProfileHealthService implements vscode.Disposable {
           ? getLastRefreshTimestamp(result.authData)
           : current.lastRenewedAt,
         tokenRefreshInProgress: false,
-        tokenRenewErrorMessage:
-          result?.errorMessage || 'Token renewal failed',
+        tokenRenewErrorMessage: result?.errorMessage || 'Token renewal failed',
         updatedAt: Date.now(),
       })
       this.onDidChangeStateEmitter.fire(profileId)
@@ -500,9 +499,12 @@ export class ProfileHealthService implements vscode.Disposable {
       return
     }
 
-    this.tokenRenewTimer = setInterval(() => {
-      void this.refreshDueTokens()
-    }, this.getTokenAutoRenewIntervalMinutes() * 60 * 1000)
+    this.tokenRenewTimer = setInterval(
+      () => {
+        void this.refreshDueTokens()
+      },
+      this.getTokenAutoRenewIntervalMinutes() * 60 * 1000,
+    )
   }
 
   private scheduleDeferredTokenRenewSweep(): void {

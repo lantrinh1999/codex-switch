@@ -1,5 +1,5 @@
 import * as vscode from 'vscode'
-import { ProfileSummary } from '../types'
+import { ProfileSummary, RuntimeSession } from '../types'
 import { escapeMarkdown } from '../utils/markdown'
 
 function buildCommandUri(command: string, args: unknown[]): string {
@@ -11,7 +11,7 @@ function escapeLinkTitle(text: string): string {
 }
 
 export function createProfileTooltip(
-  activeProfile: ProfileSummary | null,
+  runtimeSession: RuntimeSession | null,
   profiles: ProfileSummary[],
 ): vscode.MarkdownString {
   const tooltip = new vscode.MarkdownString()
@@ -26,10 +26,48 @@ export function createProfileTooltip(
 
   tooltip.appendMarkdown(`${vscode.l10n.t('Codex accounts')}\n\n`)
 
+  if (!runtimeSession || runtimeSession.kind === 'noAuth') {
+    tooltip.appendMarkdown(
+      `${vscode.l10n.t('Runtime auth')}: ${vscode.l10n.t('none')}\n\n`,
+    )
+  } else if (runtimeSession.kind === 'externalAuth') {
+    const email =
+      runtimeSession.authData?.email &&
+      runtimeSession.authData.email !== 'Unknown'
+        ? runtimeSession.authData.email
+        : vscode.l10n.t('Unknown')
+    const plan =
+      runtimeSession.authData?.planType &&
+      runtimeSession.authData.planType !== 'Unknown'
+        ? runtimeSession.authData.planType.toUpperCase()
+        : vscode.l10n.t('Unknown')
+    tooltip.appendMarkdown(
+      `${vscode.l10n.t('Runtime auth')}: ${vscode.l10n.t('external session')} (${escapeMarkdown(email)} · ${escapeMarkdown(plan)})\n\n`,
+    )
+  } else {
+    const activeProfile = profiles.find(
+      (profile) => profile.id === runtimeSession.matchedProfileId,
+    )
+    tooltip.appendMarkdown(
+      `${vscode.l10n.t('Runtime auth')}: ${escapeMarkdown(
+        activeProfile?.name || vscode.l10n.t('saved profile'),
+      )}\n\n`,
+    )
+  }
+
+  if (runtimeSession?.warningMessage) {
+    tooltip.appendMarkdown(
+      `> ${escapeMarkdown(runtimeSession.warningMessage)}\n\n`,
+    )
+  }
+
   if (!profiles || profiles.length === 0) {
     tooltip.appendMarkdown(`${vscode.l10n.t('No profiles yet.')}\n\n`)
   } else {
-    const activeId = activeProfile?.id
+    const activeId =
+      runtimeSession?.kind === 'matchedProfile'
+        ? runtimeSession.matchedProfileId
+        : undefined
     for (const p of profiles) {
       const name = escapeMarkdown(p.name)
       const rawPlan = p.planType || 'Unknown'

@@ -1,10 +1,19 @@
 import * as vscode from 'vscode'
-import { ProfileHealthState, ProfileSummary, QuotaWindowInfo } from '../types'
+import {
+  ProfileHealthState,
+  ProfileSummary,
+  QuotaWindowInfo,
+  RuntimeSession,
+} from '../types'
 import {
   formatQuotaSummary,
   formatQuotaWindowDescription,
+  getRefreshTokenStatus,
   getQuotaWindowLabel,
+  getTokenStatus,
 } from '../health/profile-health'
+
+const RUNTIME_SESSION_NODE_ID = '__runtime__'
 
 function getLastRenewedLabel(
   healthState: ProfileHealthState | undefined,
@@ -178,7 +187,80 @@ function getRootIcon(
   return new vscode.ThemeIcon('account')
 }
 
-export type ProfileTreeNode = ProfileTreeItem | ProfileDetailItem
+function buildRuntimeSessionDescription(
+  runtimeSession: RuntimeSession,
+): string | undefined {
+  if (runtimeSession.kind === 'noAuth') {
+    return vscode.l10n.t('No auth.json session')
+  }
+
+  if (runtimeSession.kind === 'externalAuth') {
+    const parts = [vscode.l10n.t('External auth.json session')]
+    if (
+      runtimeSession.authData?.planType &&
+      runtimeSession.authData.planType !== 'Unknown'
+    ) {
+      parts.push(runtimeSession.authData.planType)
+    }
+    return parts.join(' · ')
+  }
+
+  return undefined
+}
+
+function buildRuntimeSessionTooltip(runtimeSession: RuntimeSession): string {
+  const lines = [
+    `${vscode.l10n.t('Runtime auth')}: ${
+      runtimeSession.kind === 'externalAuth'
+        ? vscode.l10n.t('External session')
+        : vscode.l10n.t('None')
+    }`,
+    `${vscode.l10n.t('Auth file')}: ${runtimeSession.authPath}`,
+  ]
+
+  if (runtimeSession.authData) {
+    lines.push(
+      `${vscode.l10n.t('Email')}: ${
+        runtimeSession.authData.email || vscode.l10n.t('Unknown')
+      }`,
+    )
+    lines.push(
+      `${vscode.l10n.t('Plan')}: ${
+        runtimeSession.authData.planType || vscode.l10n.t('Unknown')
+      }`,
+    )
+    lines.push(
+      `${vscode.l10n.t('Token')}: ${getTokenStatus(runtimeSession.authData).label}`,
+    )
+    lines.push(
+      `${vscode.l10n.t('Refresh token')}: ${
+        getRefreshTokenStatus(runtimeSession.authData).label
+      }`,
+    )
+  }
+
+  if (runtimeSession.warningMessage) {
+    lines.push(runtimeSession.warningMessage)
+  }
+
+  return lines.join('\n')
+}
+
+function getRuntimeSessionIcon(
+  runtimeSession: RuntimeSession,
+): vscode.ThemeIcon {
+  if (runtimeSession.kind === 'externalAuth') {
+    return new vscode.ThemeIcon(
+      'warning',
+      new vscode.ThemeColor('editorWarning.foreground'),
+    )
+  }
+
+  return new vscode.ThemeIcon('circle-slash')
+}
+
+export type ProfileTreeRootItem = ProfileTreeItem | RuntimeSessionTreeItem
+export type ProfileTreeNode = ProfileTreeRootItem | ProfileDetailItem
 
 export class ProfileDetailItem extends vscode.TreeItem {
   constructor(
@@ -186,13 +268,33 @@ export class ProfileDetailItem extends vscode.TreeItem {
     description: string | undefined,
     tooltip: string | undefined,
     public readonly profileId: string,
-    public readonly parent?: ProfileTreeItem,
+    public readonly parent?: ProfileTreeRootItem,
     public readonly rawValue?: string,
   ) {
     super(label, vscode.TreeItemCollapsibleState.None)
     this.description = description
     this.tooltip = tooltip
     this.contextValue = rawValue ? 'profileCopyableField' : 'profileDetail'
+  }
+}
+
+export class RuntimeSessionTreeItem extends vscode.TreeItem {
+  readonly nodeId = RUNTIME_SESSION_NODE_ID
+
+  constructor(
+    public readonly runtimeSession: RuntimeSession,
+    isExpanded: boolean,
+  ) {
+    super(
+      vscode.l10n.t('Runtime auth'),
+      isExpanded
+        ? vscode.TreeItemCollapsibleState.Expanded
+        : vscode.TreeItemCollapsibleState.Collapsed,
+    )
+    this.description = buildRuntimeSessionDescription(runtimeSession)
+    this.tooltip = buildRuntimeSessionTooltip(runtimeSession)
+    this.contextValue = 'runtimeSessionItem'
+    this.iconPath = getRuntimeSessionIcon(runtimeSession)
   }
 }
 
@@ -226,9 +328,9 @@ export class ProfileTreeProvider
   readonly onDidChangeTreeData = this.onDidChangeTreeDataEmitter.event
 
   private profiles: ProfileSummary[] = []
-  private activeProfileId: string | undefined
+  private runtimeSession: RuntimeSession | null = null
   private healthStates = new Map<string, ProfileHealthState>()
-  private rootItems: ProfileTreeItem[] = []
+  private rootItems: ProfileTreeRootItem[] = []
   private expandedProfileIds = new Set<string>()
 
   dispose(): void {
@@ -237,27 +339,45 @@ export class ProfileTreeProvider
 
   setState(
     profiles: ProfileSummary[],
-    activeProfileId: string | undefined,
+    runtimeSession: RuntimeSession | null,
     healthStates: ReadonlyMap<string, ProfileHealthState>,
   ): void {
     this.profiles = profiles
-    this.activeProfileId = activeProfileId
+    this.runtimeSession = runtimeSession
     this.healthStates = new Map(healthStates)
-    const visibleProfileIds = new Set(this.profiles.map((profile) => profile.id))
+    const visibleProfileIds = new Set(
+      this.profiles.map((profile) => profile.id),
+    )
+    if (runtimeSession && runtimeSession.kind !== 'matchedProfile') {
+      visibleProfileIds.add(RUNTIME_SESSION_NODE_ID)
+    }
     this.expandedProfileIds = new Set(
       [...this.expandedProfileIds].filter((profileId) =>
         visibleProfileIds.has(profileId),
       ),
     )
-    this.rootItems = this.profiles.map(
-      (profile) =>
-        new ProfileTreeItem(
-          profile,
-          this.healthStates.get(profile.id),
-          profile.id === this.activeProfileId,
-          this.expandedProfileIds.has(profile.id),
+    const nextRootItems: ProfileTreeRootItem[] = []
+    if (runtimeSession && runtimeSession.kind !== 'matchedProfile') {
+      nextRootItems.push(
+        new RuntimeSessionTreeItem(
+          runtimeSession,
+          this.expandedProfileIds.has(RUNTIME_SESSION_NODE_ID),
         ),
+      )
+    }
+    nextRootItems.push(
+      ...this.profiles.map(
+        (profile) =>
+          new ProfileTreeItem(
+            profile,
+            this.healthStates.get(profile.id),
+            runtimeSession?.kind === 'matchedProfile' &&
+              profile.id === runtimeSession.matchedProfileId,
+            this.expandedProfileIds.has(profile.id),
+          ),
+      ),
     )
+    this.rootItems = nextRootItems
     this.onDidChangeTreeDataEmitter.fire(undefined)
   }
 
@@ -271,7 +391,11 @@ export class ProfileTreeProvider
 
   expandAll(): void {
     for (const item of this.rootItems) {
-      this.expandedProfileIds.add(item.profile.id)
+      if (item instanceof ProfileTreeItem) {
+        this.expandedProfileIds.add(item.profile.id)
+        continue
+      }
+      this.expandedProfileIds.add(RUNTIME_SESSION_NODE_ID)
     }
   }
 
@@ -288,10 +412,14 @@ export class ProfileTreeProvider
       return []
     }
 
+    if (element instanceof RuntimeSessionTreeItem) {
+      return this.buildRuntimeSessionDetails(element)
+    }
+
     return this.buildProfileDetails(element)
   }
 
-  getRootItems(): ProfileTreeItem[] {
+  getRootItems(): ProfileTreeRootItem[] {
     return this.rootItems
   }
 
@@ -497,6 +625,107 @@ export class ProfileTreeProvider
       )
       secondaryItem.iconPath = quotaIcon(secondary)
       items.push(secondaryItem)
+    }
+
+    return items
+  }
+
+  private buildRuntimeSessionDetails(
+    parent: RuntimeSessionTreeItem,
+  ): ProfileDetailItem[] {
+    const items: ProfileDetailItem[] = []
+    const { runtimeSession } = parent
+
+    const statusItem = new ProfileDetailItem(
+      vscode.l10n.t('Status'),
+      runtimeSession.kind === 'externalAuth'
+        ? vscode.l10n.t('External auth.json session')
+        : vscode.l10n.t('No auth.json session'),
+      buildRuntimeSessionTooltip(runtimeSession),
+      RUNTIME_SESSION_NODE_ID,
+      parent,
+    )
+    statusItem.iconPath = getRuntimeSessionIcon(runtimeSession)
+    items.push(statusItem)
+
+    const authPathItem = new ProfileDetailItem(
+      vscode.l10n.t('Auth file'),
+      runtimeSession.authPath,
+      runtimeSession.authPath,
+      RUNTIME_SESSION_NODE_ID,
+      parent,
+      runtimeSession.authPath,
+    )
+    authPathItem.iconPath = new vscode.ThemeIcon('file')
+    items.push(authPathItem)
+
+    if (runtimeSession.authData) {
+      const email = runtimeSession.authData.email || vscode.l10n.t('Unknown')
+      const emailItem = new ProfileDetailItem(
+        vscode.l10n.t('Email'),
+        email,
+        email,
+        RUNTIME_SESSION_NODE_ID,
+        parent,
+        email !== vscode.l10n.t('Unknown') ? email : undefined,
+      )
+      emailItem.iconPath = new vscode.ThemeIcon('mail')
+      items.push(emailItem)
+
+      const plan = runtimeSession.authData.planType || vscode.l10n.t('Unknown')
+      const planItem = new ProfileDetailItem(
+        vscode.l10n.t('Plan'),
+        plan,
+        plan,
+        RUNTIME_SESSION_NODE_ID,
+        parent,
+      )
+      planItem.iconPath = new vscode.ThemeIcon('tag')
+      items.push(planItem)
+
+      const tokenStatus = getTokenStatus(runtimeSession.authData)
+      const tokenItem = new ProfileDetailItem(
+        vscode.l10n.t('Token'),
+        tokenStatus.label,
+        tokenStatus.label,
+        RUNTIME_SESSION_NODE_ID,
+        parent,
+      )
+      tokenItem.iconPath = tokenStatus.isExpired
+        ? new vscode.ThemeIcon(
+            'error',
+            new vscode.ThemeColor('errorForeground'),
+          )
+        : new vscode.ThemeIcon('pass', new vscode.ThemeColor('charts.green'))
+      items.push(tokenItem)
+
+      const refreshTokenStatus = getRefreshTokenStatus(runtimeSession.authData)
+      const refreshTokenItem = new ProfileDetailItem(
+        vscode.l10n.t('Refresh token'),
+        refreshTokenStatus.label,
+        refreshTokenStatus.label,
+        RUNTIME_SESSION_NODE_ID,
+        parent,
+      )
+      refreshTokenItem.iconPath = refreshTokenStatus.available
+        ? new vscode.ThemeIcon('refresh', new vscode.ThemeColor('charts.green'))
+        : new vscode.ThemeIcon('circle-slash')
+      items.push(refreshTokenItem)
+    }
+
+    if (runtimeSession.warningMessage) {
+      const warningItem = new ProfileDetailItem(
+        vscode.l10n.t('Warning'),
+        runtimeSession.warningMessage,
+        runtimeSession.warningMessage,
+        RUNTIME_SESSION_NODE_ID,
+        parent,
+      )
+      warningItem.iconPath = new vscode.ThemeIcon(
+        'warning',
+        new vscode.ThemeColor('editorWarning.foreground'),
+      )
+      items.push(warningItem)
     }
 
     return items

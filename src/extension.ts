@@ -14,14 +14,15 @@ import {
 import { RefreshCoordinator } from './ui/refresh-coordinator'
 import { registerCommands } from './commands'
 import { debugLog, errorLog } from './utils/log'
-import { ProfileSummary } from './types'
+import { ProfileSummary, RuntimeSession } from './types'
 
 let profileManager: ProfileManager | undefined
 let profileHealthService: ProfileHealthService | undefined
 let profileTreeProvider: ProfileTreeProvider | undefined
 let refreshCoordinator: RefreshCoordinator | undefined
 let cachedProfiles: ProfileSummary[] = []
-let cachedActiveProfileId: string | undefined
+let cachedRuntimeSession: RuntimeSession | null = null
+let lastWarningSignature: string | undefined
 
 export function activate(context: vscode.ExtensionContext) {
   debugLog('Codex Switch activated')
@@ -47,11 +48,19 @@ export function activate(context: vscode.ExtensionContext) {
     profileTreeView.onDidExpandElement(({ element }) => {
       if (element instanceof ProfileTreeItem) {
         profileTreeProvider?.setExpanded(element.profile.id, true)
+        return
+      }
+      if ('nodeId' in element && typeof element.nodeId === 'string') {
+        profileTreeProvider?.setExpanded(element.nodeId, true)
       }
     }),
     profileTreeView.onDidCollapseElement(({ element }) => {
       if (element instanceof ProfileTreeItem) {
         profileTreeProvider?.setExpanded(element.profile.id, false)
+        return
+      }
+      if ('nodeId' in element && typeof element.nodeId === 'string') {
+        profileTreeProvider?.setExpanded(element.nodeId, false)
       }
     }),
   )
@@ -61,8 +70,10 @@ export function activate(context: vscode.ExtensionContext) {
       await refreshProfileUi()
     } catch (error) {
       errorLog('Error refreshing profile UI:', error)
+      cachedProfiles = []
+      cachedRuntimeSession = null
       updateProfileStatus(null, [])
-      profileTreeProvider?.setState([], undefined, new Map())
+      profileTreeProvider?.setState([], null, new Map())
     }
   }
 
@@ -96,7 +107,6 @@ export function activate(context: vscode.ExtensionContext) {
   )
 
   void refreshCoordinator.refreshAll()
-  void profileManager.syncActiveProfileToCodexAuthFile()
 }
 
 function renderProfileUi() {
@@ -107,28 +117,49 @@ function renderProfileUi() {
 
   profileTreeProvider.setState(
     cachedProfiles,
-    cachedActiveProfileId,
+    cachedRuntimeSession,
     profileHealthService.getStates(),
   )
 
-  if (!cachedActiveProfileId) {
+  if (!cachedRuntimeSession) {
     updateProfileStatus(null, cachedProfiles)
+    return
+  }
+
+  if (cachedRuntimeSession.kind !== 'matchedProfile') {
+    updateProfileStatus(cachedRuntimeSession, cachedProfiles)
     return
   }
 
   const activeProfile =
-    cachedProfiles.find((profile) => profile.id === cachedActiveProfileId) ||
-    null
+    cachedProfiles.find(
+      (profile) => profile.id === cachedRuntimeSession?.matchedProfileId,
+    ) || null
   if (!activeProfile) {
-    updateProfileStatus(null, cachedProfiles)
+    updateProfileStatus(cachedRuntimeSession, cachedProfiles)
     return
   }
 
   updateProfileStatus(
-    activeProfile,
+    cachedRuntimeSession,
     cachedProfiles,
     profileHealthService.getState(activeProfile.id),
   )
+}
+
+function maybeShowWarning(message: string | undefined) {
+  const signature = message?.trim() || undefined
+  if (!signature) {
+    lastWarningSignature = undefined
+    return
+  }
+
+  if (signature === lastWarningSignature) {
+    return
+  }
+
+  lastWarningSignature = signature
+  void vscode.window.showWarningMessage(signature)
 }
 
 async function refreshProfileUi() {
@@ -139,14 +170,14 @@ async function refreshProfileUi() {
 
   const profiles = await profileManager.listProfiles()
   await profileHealthService.primeProfiles(profiles)
-  let activeId = await profileManager.getActiveProfileId()
-  if (activeId && !profiles.some((profile) => profile.id === activeId)) {
-    await profileManager.setActiveProfileId(undefined)
-    activeId = undefined
-  }
+  const runtimeSession = await profileManager.getRuntimeSession(profiles)
+  const isolationStatus = profileManager.getRuntimeIsolationStatus()
 
   cachedProfiles = profiles
-  cachedActiveProfileId = activeId
+  cachedRuntimeSession = runtimeSession
+  maybeShowWarning(
+    isolationStatus.warningMessage || runtimeSession.warningMessage,
+  )
   renderProfileUi()
 }
 

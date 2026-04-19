@@ -107,8 +107,15 @@ export function deleteFileIfExists(filePath: string): void {
   }
 }
 
-function isLeaseExpired(lease: SharedLeaseFile | null, now = Date.now()): boolean {
-  if (!lease || typeof lease.expiresAt !== 'string' || !lease.expiresAt.trim()) {
+function isLeaseExpired(
+  lease: SharedLeaseFile | null,
+  now = Date.now(),
+): boolean {
+  if (
+    !lease ||
+    typeof lease.expiresAt !== 'string' ||
+    !lease.expiresAt.trim()
+  ) {
     return true
   }
 
