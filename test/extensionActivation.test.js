@@ -54,10 +54,15 @@ function createMemento() {
   }
 }
 
-function createExtensionContext(globalStoragePath) {
+function createExtensionContext(globalStoragePath, options = {}) {
   return {
     subscriptions: [],
     globalStorageUri: { fsPath: globalStoragePath },
+    storageUri: options.storagePath
+      ? { fsPath: options.storagePath }
+      : undefined,
+    environmentVariableCollection:
+      options.environmentVariableCollection ?? undefined,
     secrets: {
       values: new Map(),
       async get(key) {
@@ -87,6 +92,20 @@ function createStatusBarItem() {
 
 function createVscodeMock(options = {}) {
   const registeredCommands = new Map()
+  const configurationListeners = new Set()
+  const configurationValues = new Map([
+    ['codexSwitch.storageMode', 'secretStorage'],
+    ['codexSwitch.quotaRefreshInterval', 0],
+    ['codexSwitch.autoRenewTokens', false],
+    ['codexSwitch.reloadWindowAfterProfileSwitch', false],
+    ['codexSwitch.statusBarClickBehavior', 'cycle'],
+    ['codexSwitch.statusBarSwitchTrigger', 'click'],
+    [
+      'codexSwitch.workspaceSpecificCodexHome',
+      options.workspaceSpecificCodexHome ?? true,
+    ],
+    ['chatgpt.runCodexInWindowsSubsystemForLinux', false],
+  ])
 
   class EventEmitter {
     constructor() {
@@ -117,7 +136,7 @@ function createVscodeMock(options = {}) {
     }
   }
 
-  return {
+  const vscodeMock = {
     l10n: {
       t(message, ...args) {
         return message.replace(/\{(\d+)\}/g, (_, index) =>
@@ -216,37 +235,18 @@ function createVscodeMock(options = {}) {
     },
     workspace: {
       workspaceFolders: undefined,
+      workspaceFile: options.workspaceFile,
       getConfiguration(section) {
         return {
           get(key, defaultValue) {
-            if (section === 'codexSwitch' && key === 'storageMode') {
-              return 'secretStorage'
-            }
-            if (section === 'codexSwitch' && key === 'quotaRefreshInterval') {
-              return 0
-            }
-            if (section === 'codexSwitch' && key === 'autoRenewTokens') {
-              return false
-            }
-            if (
-              section === 'codexSwitch' &&
-              key === 'reloadWindowAfterProfileSwitch'
-            ) {
-              return false
-            }
-            if (section === 'codexSwitch' && key === 'statusBarClickBehavior') {
-              return 'cycle'
-            }
-            if (section === 'codexSwitch' && key === 'statusBarSwitchTrigger') {
-              return 'click'
-            }
-            if (
-              section === 'chatgpt' &&
-              key === 'runCodexInWindowsSubsystemForLinux'
-            ) {
-              return false
+            const configKey = `${section}.${key}`
+            if (configurationValues.has(configKey)) {
+              return configurationValues.get(configKey)
             }
             return defaultValue
+          },
+          async update(key, value) {
+            configurationValues.set(`${section}.${key}`, value)
           },
           has() {
             return false
@@ -261,8 +261,13 @@ function createVscodeMock(options = {}) {
           dispose() {},
         }
       },
-      onDidChangeConfiguration() {
-        return { dispose() {} }
+      onDidChangeConfiguration(listener) {
+        configurationListeners.add(listener)
+        return {
+          dispose() {
+            configurationListeners.delete(listener)
+          },
+        }
       },
     },
     commands: {
@@ -289,6 +294,26 @@ function createVscodeMock(options = {}) {
       },
     },
   }
+
+  vscodeMock.fireConfigurationChange = (...keys) => {
+    const changed = new Set(keys)
+    for (const listener of configurationListeners) {
+      listener({
+        affectsConfiguration(target) {
+          return (
+            changed.has(target) ||
+            [...changed].some(
+              (key) =>
+                key.startsWith(`${target}.`) || target.startsWith(`${key}.`),
+            )
+          )
+        },
+      })
+    }
+  }
+
+  vscodeMock.configurationValues = configurationValues
+  return vscodeMock
 }
 
 async function withMockedVscode(vscodeMock, fn) {
@@ -312,6 +337,119 @@ async function withMockedVscode(vscodeMock, fn) {
     Module._load = originalLoad
   }
 }
+
+test('extension activation adopts the workspace CODEX_HOME inside the extension host', async () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'codex-switch-extension-workspace-home-'),
+  )
+  const globalCodexHome = path.join(tempDir, 'global-codex-home')
+  const workspaceStoragePath = path.join(tempDir, 'workspace-storage')
+  const globalStoragePath = path.join(tempDir, 'storage')
+  fs.mkdirSync(globalStoragePath, { recursive: true })
+  fs.mkdirSync(globalCodexHome, { recursive: true })
+
+  const previousCodexHome = process.env.CODEX_HOME
+  process.env.CODEX_HOME = globalCodexHome
+
+  try {
+    await withMockedVscode(createVscodeMock(), async () => {
+      const replacements = new Map()
+      const extension = require('../out/extension.js')
+      const context = createExtensionContext(globalStoragePath, {
+        storagePath: workspaceStoragePath,
+        environmentVariableCollection: {
+          replace(key, value) {
+            replacements.set(key, value)
+          },
+        },
+      })
+
+      extension.activate(context)
+      await new Promise((resolve) => setImmediate(resolve))
+
+      const expectedCodexHome = path.join(workspaceStoragePath, '.codex')
+      assert.equal(process.env.CODEX_HOME, expectedCodexHome)
+      assert.equal(replacements.get('CODEX_HOME'), expectedCodexHome)
+    })
+  } finally {
+    if (typeof previousCodexHome === 'undefined') {
+      delete process.env.CODEX_HOME
+    } else {
+      process.env.CODEX_HOME = previousCodexHome
+    }
+  }
+})
+
+test('workspace-specific CODEX_HOME setting can disable and re-enable runtime isolation live', async () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'codex-switch-extension-workspace-toggle-'),
+  )
+  const globalCodexHome = path.join(tempDir, 'global-codex-home')
+  const workspaceStoragePath = path.join(tempDir, 'workspace-storage')
+  const globalStoragePath = path.join(tempDir, 'storage')
+  fs.mkdirSync(globalStoragePath, { recursive: true })
+  fs.mkdirSync(globalCodexHome, { recursive: true })
+
+  const previousCodexHome = process.env.CODEX_HOME
+  process.env.CODEX_HOME = globalCodexHome
+
+  try {
+    const vscodeMock = createVscodeMock()
+    await withMockedVscode(vscodeMock, async () => {
+      const replacements = new Map()
+      const deletions = []
+      const extension = require('../out/extension.js')
+      const context = createExtensionContext(globalStoragePath, {
+        storagePath: workspaceStoragePath,
+        environmentVariableCollection: {
+          replace(key, value) {
+            replacements.set(key, value)
+          },
+          delete(key) {
+            deletions.push(key)
+          },
+        },
+      })
+
+      extension.activate(context)
+      await new Promise((resolve) => setImmediate(resolve))
+
+      const expectedWorkspaceCodexHome = path.join(workspaceStoragePath, '.codex')
+      assert.equal(process.env.CODEX_HOME, expectedWorkspaceCodexHome)
+
+      vscodeMock.configurationValues.set(
+        'codexSwitch.workspaceSpecificCodexHome',
+        false,
+      )
+      vscodeMock.fireConfigurationChange(
+        'codexSwitch.workspaceSpecificCodexHome',
+      )
+      await new Promise((resolve) => setImmediate(resolve))
+
+      assert.equal(process.env.CODEX_HOME, globalCodexHome)
+      assert.equal(replacements.get('CODEX_HOME'), globalCodexHome)
+      assert.deepEqual(deletions, [])
+
+      vscodeMock.configurationValues.set(
+        'codexSwitch.workspaceSpecificCodexHome',
+        true,
+      )
+      vscodeMock.fireConfigurationChange(
+        'codexSwitch.workspaceSpecificCodexHome',
+      )
+      await new Promise((resolve) => setImmediate(resolve))
+
+      assert.equal(process.env.CODEX_HOME, expectedWorkspaceCodexHome)
+      assert.equal(replacements.get('CODEX_HOME'), expectedWorkspaceCodexHome)
+    })
+  } finally {
+    if (typeof previousCodexHome === 'undefined') {
+      delete process.env.CODEX_HOME
+    } else {
+      process.env.CODEX_HOME = previousCodexHome
+    }
+  }
+})
 
 test('extension activation does not overwrite a newer external auth.json session', async () => {
   const tempDir = fs.mkdtempSync(

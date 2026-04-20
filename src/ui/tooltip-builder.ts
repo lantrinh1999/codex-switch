@@ -1,5 +1,12 @@
 import * as vscode from 'vscode'
 import { ProfileSummary, RuntimeSession } from '../types'
+import {
+  getProfileAlias,
+  getProfileFullEmail,
+  getProfilePrimaryLabel,
+  getRuntimeAlias,
+  getRuntimePrimaryLabel,
+} from '../profile-labels'
 import { escapeMarkdown } from '../utils/markdown'
 
 function buildCommandUri(command: string, args: unknown[]): string {
@@ -31,27 +38,26 @@ export function createProfileTooltip(
       `${vscode.l10n.t('Runtime auth')}: ${vscode.l10n.t('none')}\n\n`,
     )
   } else if (runtimeSession.kind === 'externalAuth') {
-    const email =
-      runtimeSession.authData?.email &&
-      runtimeSession.authData.email !== 'Unknown'
-        ? runtimeSession.authData.email
-        : vscode.l10n.t('Unknown')
+    const runtimeLabel = getRuntimePrimaryLabel(runtimeSession)
+    const email = runtimeSession.authData?.email || vscode.l10n.t('Unknown')
     const plan =
       runtimeSession.authData?.planType &&
       runtimeSession.authData.planType !== 'Unknown'
         ? runtimeSession.authData.planType.toUpperCase()
         : vscode.l10n.t('Unknown')
     tooltip.appendMarkdown(
-      `${vscode.l10n.t('Runtime auth')}: ${vscode.l10n.t('external session')} (${escapeMarkdown(email)} · ${escapeMarkdown(plan)})\n\n`,
+      `${vscode.l10n.t('Runtime auth')}: ${escapeMarkdown(runtimeLabel)} (${vscode.l10n.t('external session')} · ${escapeMarkdown(email)} · ${escapeMarkdown(plan)})\n\n`,
     )
   } else {
     const activeProfile = profiles.find(
       (profile) => profile.id === runtimeSession.matchedProfileId,
     )
+    const runtimeLabel = getRuntimePrimaryLabel(runtimeSession, activeProfile)
+    const alias = activeProfile ? getRuntimeAlias(runtimeSession, activeProfile) : undefined
     tooltip.appendMarkdown(
-      `${vscode.l10n.t('Runtime auth')}: ${escapeMarkdown(
-        activeProfile?.name || vscode.l10n.t('saved profile'),
-      )}\n\n`,
+      `${vscode.l10n.t('Runtime auth')}: ${escapeMarkdown(runtimeLabel)}${
+        alias ? ` (${escapeMarkdown(alias)})` : ''
+      }\n\n`,
     )
   }
 
@@ -69,27 +75,41 @@ export function createProfileTooltip(
         ? runtimeSession.matchedProfileId
         : undefined
     for (const p of profiles) {
-      const name = escapeMarkdown(p.name)
+      const isActive = Boolean(activeId && p.id === activeId)
+      const label = escapeMarkdown(
+        isActive && runtimeSession?.kind === 'matchedProfile'
+          ? getRuntimePrimaryLabel(runtimeSession, p)
+          : getProfilePrimaryLabel(p),
+      )
+      const alias = escapeMarkdown(
+        isActive && runtimeSession?.kind === 'matchedProfile'
+          ? getRuntimeAlias(runtimeSession, p) || ''
+          : getProfileAlias(p) || '',
+      )
       const rawPlan = p.planType || 'Unknown'
       const planDisplay =
         rawPlan === 'Unknown' ? vscode.l10n.t('Unknown') : rawPlan.toUpperCase()
       const plan = escapeMarkdown(planDisplay)
       const switchUri = buildCommandUri('codex-switch.profile.activate', [p.id])
-      const emailDisplay =
-        p.email && p.email !== 'Unknown' ? p.email : vscode.l10n.t('Unknown')
+      const emailDisplay = getProfileFullEmail(p) || vscode.l10n.t('Unknown')
       const linkTitle = escapeLinkTitle(emailDisplay)
-      const isActive = Boolean(activeId && p.id === activeId)
       const linkedName = isActive
-        ? `[**${name}**](${switchUri} "${linkTitle}")`
-        : `[${name}](${switchUri} "${linkTitle}")`
+        ? `[**${label}**](${switchUri} "${linkTitle}")`
+        : `[${label}](${switchUri} "${linkTitle}")`
+      const suffixParts = [alias || undefined, plan]
+      const suffix = suffixParts.filter(Boolean).join(' · ')
 
       if (isActive) {
         const activeLabel = escapeMarkdown(vscode.l10n.t('Active'))
         tooltip.appendMarkdown(
-          `* ${linkedName} - ${plan} <span style="color: var(--vscode-textLink-activeForeground); font-weight: 600;">(${activeLabel})</span>\n`,
+          `* ${linkedName}${
+            suffix ? ` - ${suffix}` : ''
+          } <span style="color: var(--vscode-textLink-activeForeground); font-weight: 600;">(${activeLabel})</span>\n`,
         )
       } else {
-        tooltip.appendMarkdown(`* ${linkedName} - ${plan}\n`)
+        tooltip.appendMarkdown(
+          `* ${linkedName}${suffix ? ` - ${suffix}` : ''}\n`,
+        )
       }
     }
     tooltip.appendMarkdown('\n')

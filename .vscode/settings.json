@@ -1,0 +1,7 @@
+{
+  "codexSwitch.reloadWindowAfterProfileSwitch": true,
+  "codexSwitch.debugLogging": true,
+  "codexSwitch.statusBarClickBehavior": "bestQuota",
+  "codexSwitch.statusBarSwitchTrigger": "doubleClick",
+  "codexSwitch.workspaceSpecificCodexHome": true
+}

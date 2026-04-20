@@ -12,6 +12,14 @@ import {
   getQuotaWindowLabel,
   getTokenStatus,
 } from '../health/profile-health'
+import {
+  getProfileAlias,
+  getProfileFullEmail,
+  getProfilePrimaryLabel,
+  getRuntimeAlias,
+  getRuntimeFullEmail,
+  getRuntimePrimaryLabel,
+} from '../profile-labels'
 
 const RUNTIME_SESSION_NODE_ID = '__runtime__'
 
@@ -73,9 +81,16 @@ function getWorkspaceLabel(profile: ProfileSummary): string | null {
 function buildRootDescription(
   profile: ProfileSummary,
   healthState: ProfileHealthState | undefined,
+  alias?: string,
 ): string | undefined {
+  const parts: string[] = []
+  if (alias) {
+    parts.push(alias)
+  }
+
   if (healthState?.tokenRefreshInProgress) {
-    return vscode.l10n.t('Renewing token')
+    parts.push(vscode.l10n.t('Renewing token'))
+    return parts.join(' · ')
   }
 
   // Keep collapsed rows stable even after a failed renewal attempt. The
@@ -83,10 +98,10 @@ function buildRootDescription(
   // root row continues to show the usual quota/token summary the user expects.
   const quotaSummary = formatQuotaSummary(healthState?.quotaInfo || null)
   if (quotaSummary) {
-    return quotaSummary
+    parts.push(quotaSummary)
+    return parts.join(' · ')
   }
 
-  const parts: string[] = []
   if (profile.planType && profile.planType !== 'Unknown') {
     parts.push(profile.planType)
   }
@@ -107,20 +122,22 @@ function buildRootDescription(
 }
 
 function buildRootTooltip(
+  displayLabel: string,
+  displayEmail: string | undefined,
+  displayAlias: string | undefined,
   profile: ProfileSummary,
   isActive: boolean,
   healthState: ProfileHealthState | undefined,
 ): string {
   const lines = [
-    `${vscode.l10n.t('Profile')}: ${profile.name}`,
-    `${vscode.l10n.t('Email')}: ${
-      profile.email && profile.email !== 'Unknown'
-        ? profile.email
-        : vscode.l10n.t('Unknown')
-    }`,
+    `${vscode.l10n.t('Account')}: ${displayLabel}`,
+    `${vscode.l10n.t('Email')}: ${displayEmail || vscode.l10n.t('Unknown')}`,
     `${vscode.l10n.t('Plan')}: ${profile.planType || vscode.l10n.t('Unknown')}`,
   ]
 
+  if (displayAlias) {
+    lines.push(`${vscode.l10n.t('Profile alias')}: ${displayAlias}`)
+  }
   const workspace = getWorkspaceLabel(profile)
   if (workspace) {
     lines.push(`${vscode.l10n.t('Workspace')}: ${workspace}`)
@@ -195,7 +212,10 @@ function buildRuntimeSessionDescription(
   }
 
   if (runtimeSession.kind === 'externalAuth') {
-    const parts = [vscode.l10n.t('External auth.json session')]
+    const parts = [
+      getRuntimePrimaryLabel(runtimeSession),
+      vscode.l10n.t('External auth.json session'),
+    ]
     if (
       runtimeSession.authData?.planType &&
       runtimeSession.authData.planType !== 'Unknown'
@@ -303,16 +323,26 @@ export class ProfileTreeItem extends vscode.TreeItem {
     public readonly profile: ProfileSummary,
     public readonly healthState: ProfileHealthState | undefined,
     public readonly isActive: boolean,
+    public readonly displayLabel: string,
+    public readonly displayEmail: string | undefined,
+    public readonly displayAlias: string | undefined,
     isExpanded: boolean,
   ) {
     super(
-      profile.name,
+      displayLabel,
       isExpanded
         ? vscode.TreeItemCollapsibleState.Expanded
         : vscode.TreeItemCollapsibleState.Collapsed,
     )
-    this.description = buildRootDescription(profile, healthState)
-    this.tooltip = buildRootTooltip(profile, isActive, healthState)
+    this.description = buildRootDescription(profile, healthState, displayAlias)
+    this.tooltip = buildRootTooltip(
+      displayLabel,
+      displayEmail,
+      displayAlias,
+      profile,
+      isActive,
+      healthState,
+    )
     this.contextValue = 'profileItem'
     this.iconPath = getRootIcon(isActive, healthState)
   }
@@ -367,14 +397,33 @@ export class ProfileTreeProvider
     }
     nextRootItems.push(
       ...this.profiles.map(
-        (profile) =>
-          new ProfileTreeItem(
+        (profile) => {
+          const isActive =
+            runtimeSession?.kind === 'matchedProfile' &&
+            profile.id === runtimeSession.matchedProfileId
+          const displayLabel =
+            isActive && runtimeSession
+              ? getRuntimePrimaryLabel(runtimeSession, profile)
+              : getProfilePrimaryLabel(profile)
+          const displayEmail =
+            isActive && runtimeSession
+              ? getRuntimeFullEmail(runtimeSession) || getProfileFullEmail(profile)
+              : getProfileFullEmail(profile)
+          const displayAlias =
+            isActive && runtimeSession
+              ? getRuntimeAlias(runtimeSession, profile)
+              : getProfileAlias(profile)
+
+          return new ProfileTreeItem(
             profile,
             this.healthStates.get(profile.id),
-            runtimeSession?.kind === 'matchedProfile' &&
-              profile.id === runtimeSession.matchedProfileId,
+            isActive,
+            displayLabel,
+            displayEmail,
+            displayAlias,
             this.expandedProfileIds.has(profile.id),
-          ),
+          )
+        },
       ),
     )
     this.rootItems = nextRootItems
@@ -433,10 +482,7 @@ export class ProfileTreeProvider
   private buildProfileDetails(parent: ProfileTreeItem): ProfileDetailItem[] {
     const items: ProfileDetailItem[] = []
     const { profile, healthState } = parent
-    const email =
-      profile.email && profile.email !== 'Unknown'
-        ? profile.email
-        : vscode.l10n.t('Unknown')
+    const email = parent.displayEmail || vscode.l10n.t('Unknown')
 
     const emailItem = new ProfileDetailItem(
       vscode.l10n.t('Email'),
@@ -448,6 +494,19 @@ export class ProfileTreeProvider
     )
     emailItem.iconPath = new vscode.ThemeIcon('mail')
     items.push(emailItem)
+
+    if (parent.displayAlias) {
+      const aliasItem = new ProfileDetailItem(
+        vscode.l10n.t('Alias'),
+        parent.displayAlias,
+        parent.displayAlias,
+        profile.id,
+        parent,
+        parent.displayAlias,
+      )
+      aliasItem.iconPath = new vscode.ThemeIcon('tag')
+      items.push(aliasItem)
+    }
 
     const planItem = new ProfileDetailItem(
       vscode.l10n.t('Plan'),

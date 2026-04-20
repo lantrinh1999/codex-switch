@@ -6,6 +6,7 @@ import { randomUUID } from 'crypto'
 import { AuthData, ProfileSummary, RuntimeSession, StorageMode } from '../types'
 import { getDefaultCodexAuthPath, loadAuthDataFromFile } from './auth-manager'
 import { syncCodexAuthFile } from './codex-auth-sync'
+import { getProfilePrimaryLabel } from '../profile-labels'
 import {
   acquireJsonLease,
   SharedActiveProfile,
@@ -113,6 +114,12 @@ export class ProfileManager {
 
   private isRemoteFilesMode(): boolean {
     return this.getResolvedStorageMode() === 'remoteFiles'
+  }
+
+  isWorkspaceSpecificCodexHomeConfigured(): boolean {
+    return vscode.workspace
+      .getConfiguration('codexSwitch')
+      .get<boolean>('workspaceSpecificCodexHome', true)
   }
 
   private normalizeEmail(email: string | undefined): string {
@@ -347,20 +354,78 @@ export class ProfileManager {
   }
 
   private async clearRetiredLocalState(
-    currentKey: string,
+    _currentKey: string,
     legacyKey: string,
   ): Promise<void> {
-    // Workspace-scoped selection state used to be valid only when runtime
-    // isolation was enabled. After removing that feature, the current window
-    // still needs to retire any workspace copy it can see so a stale local
-    // value does not keep shadowing the new global-only behavior.
-    await this.clearStateKey(this.context.workspaceState, currentKey)
+    // Clear only legacy-named keys; the current key in workspaceState is our
+    // per-window source of truth and must not be wiped here.
     await this.clearStateKey(this.context.workspaceState, legacyKey)
     await this.clearStateKey(this.context.globalState, legacyKey)
   }
 
+  getWorkspaceCodexHome(): string | undefined {
+    if (!this.isWorkspaceSpecificCodexHomeConfigured()) {
+      return undefined
+    }
+    if (this.isRemoteFilesMode()) {
+      return undefined
+    }
+    if (!this.context.storageUri) {
+      return undefined
+    }
+    // Place the workspace-specific CODEX_HOME inside the extension's own
+    // workspace storage directory. VS Code guarantees this path is unique per
+    // workspace+extension and stable for the lifetime of the workspace, with
+    // no dependency on internal VS Code path structure.
+    return path.join(this.context.storageUri.fsPath, '.codex')
+  }
+
+  getRuntimeAuthPath(): string {
+    // Keep every command and recovery path on the same resolver. Mixing this
+    // workspace path with getDefaultCodexAuthPath() is the bug that made
+    // profile actions read ~/.codex/auth.json while the window was supposed to
+    // operate on its workspace-specific runtime.
+    const wsHome = this.getWorkspaceCodexHome()
+    if (wsHome) {
+      return path.join(wsHome, 'auth.json')
+    }
+    return getDefaultCodexAuthPath()
+  }
+
+  async initWorkspaceAuth(sourceAuthPath?: string): Promise<void> {
+    if (this.isRemoteFilesMode()) {
+      return
+    }
+    const wsHome = this.getWorkspaceCodexHome()
+    if (!wsHome) {
+      return
+    }
+    const wsAuthPath = path.join(wsHome, 'auth.json')
+    if (fs.existsSync(wsAuthPath)) {
+      return
+    }
+    const globalAuthPath = sourceAuthPath || getDefaultCodexAuthPath()
+    // Activation passes the inherited auth path captured before CODEX_HOME is
+    // redirected to the workspace. If a caller skips that capture and the paths
+    // are already identical, copying would be a no-op at best and misleading at
+    // worst.
+    if (path.resolve(globalAuthPath) === path.resolve(wsAuthPath)) {
+      return
+    }
+    if (!fs.existsSync(globalAuthPath)) {
+      return
+    }
+    try {
+      fs.mkdirSync(wsHome, { recursive: true })
+      fs.copyFileSync(globalAuthPath, wsAuthPath)
+    } catch {
+      // Non-fatal: login/import commands can still populate the workspace auth
+      // file, so activation should not fail the entire extension.
+    }
+  }
+
   private syncRuntimeAuth(authData: AuthData, profileId: string): void {
-    syncCodexAuthFile(getDefaultCodexAuthPath(), authData)
+    syncCodexAuthFile(this.getRuntimeAuthPath(), authData)
     this.lastSyncedProfileId = profileId
   }
 
@@ -368,41 +433,43 @@ export class ProfileManager {
     currentKey: string,
     legacyKey: string,
   ): Promise<string | undefined> {
-    const globalBucket = this.context.globalState
     const workspaceBucket = this.context.workspaceState
-    const globalValue = globalBucket.get<string>(currentKey)
-    if (globalValue) {
-      await this.clearRetiredLocalState(currentKey, legacyKey)
-      return globalValue
-    }
+    const globalBucket = this.context.globalState
 
+    // Primary source of truth: per-workspace storage (one value per window).
     const workspaceValue = workspaceBucket.get<string>(currentKey)
     if (workspaceValue) {
-      // When users upgrade away from isolated workspaces, preserve the last
-      // workspace-scoped choice they can still reach by promoting it into the
-      // new global slot on first read. Global wins when both are present so
-      // opening an older workspace later cannot overwrite a newer shared
-      // selection that the user already made after upgrading.
-      await globalBucket.update(currentKey, workspaceValue)
       await this.clearRetiredLocalState(currentKey, legacyKey)
       return workspaceValue
     }
 
-    const globalLegacy = globalBucket.get<string>(legacyKey)
-    if (globalLegacy) {
-      await globalBucket.update(currentKey, globalLegacy)
+    // One-time migration: promote a value written by older extension versions
+    // (which used globalState) into this window's workspaceState so the choice
+    // is preserved after upgrading. Global state is left untouched so other
+    // workspace windows can perform the same migration independently.
+    const globalValue = globalBucket.get<string>(currentKey)
+    if (globalValue) {
+      await workspaceBucket.update(currentKey, globalValue)
       await this.clearRetiredLocalState(currentKey, legacyKey)
-      return globalLegacy
+      return globalValue
     }
 
+    // Legacy key fallback — workspace scope first, then global.
     const workspaceLegacy = workspaceBucket.get<string>(legacyKey)
-    if (!workspaceLegacy) {
+    if (workspaceLegacy) {
+      await workspaceBucket.update(currentKey, workspaceLegacy)
+      await this.clearRetiredLocalState(currentKey, legacyKey)
+      return workspaceLegacy
+    }
+
+    const globalLegacy = globalBucket.get<string>(legacyKey)
+    if (!globalLegacy) {
       return undefined
     }
 
-    await globalBucket.update(currentKey, workspaceLegacy)
+    await workspaceBucket.update(currentKey, globalLegacy)
     await this.clearRetiredLocalState(currentKey, legacyKey)
-    return workspaceLegacy
+    return globalLegacy
   }
 
   private async writeLocalState(
@@ -410,7 +477,7 @@ export class ProfileManager {
     legacyKey: string,
     value: string | undefined,
   ): Promise<void> {
-    await this.context.globalState.update(currentKey, value)
+    await this.context.workspaceState.update(currentKey, value)
     await this.clearRetiredLocalState(currentKey, legacyKey)
   }
 
@@ -446,8 +513,10 @@ export class ProfileManager {
         )
         return vscode.l10n.t(
           'Runtime auth currently matches "{0}", but the saved active selection still points to "{1}".',
-          runtimeProfile?.name || matchedProfileId,
-          persistedProfile.name,
+          runtimeProfile
+            ? getProfilePrimaryLabel(runtimeProfile)
+            : matchedProfileId,
+          getProfilePrimaryLabel(persistedProfile),
         )
       }
       return undefined
@@ -457,7 +526,7 @@ export class ProfileManager {
       if (persistedProfile) {
         return vscode.l10n.t(
           'Runtime auth does not match the saved active profile "{0}". Codex is using an external auth.json session.',
-          persistedProfile.name,
+          getProfilePrimaryLabel(persistedProfile),
         )
       }
       return vscode.l10n.t(
@@ -468,18 +537,82 @@ export class ProfileManager {
     if (persistedProfile) {
       return vscode.l10n.t(
         'Saved active profile "{0}" exists, but the runtime auth.json file is missing or invalid.',
-        persistedProfile.name,
+        getProfilePrimaryLabel(persistedProfile),
       )
     }
 
     return undefined
   }
 
+  private buildMatchedRuntimeSession(
+    profiles: ProfileSummary[],
+    persistedActiveProfileId: string | undefined,
+    authPath: string,
+    authData: AuthData,
+    matchedProfileId: string,
+  ): RuntimeSession {
+    return {
+      kind: 'matchedProfile',
+      authPath,
+      authData,
+      matchedProfileId,
+      warningMessage: this.buildRuntimeWarningMessage(
+        profiles,
+        persistedActiveProfileId,
+        'matchedProfile',
+        matchedProfileId,
+      ),
+    }
+  }
+
+  private async restorePersistedActiveRuntimeAuth(
+    profiles: ProfileSummary[],
+    persistedActiveProfileId: string | undefined,
+    authPath: string,
+    matchedProfileId?: string,
+  ): Promise<RuntimeSession | undefined> {
+    if (this.isRemoteFilesMode() || !persistedActiveProfileId) {
+      return undefined
+    }
+
+    if (matchedProfileId === persistedActiveProfileId) {
+      return undefined
+    }
+
+    const persistedProfile = profiles.find(
+      (profile) => profile.id === persistedActiveProfileId,
+    )
+    if (!persistedProfile) {
+      return undefined
+    }
+
+    const persistedAuthData = await this.loadAuthData(persistedProfile.id)
+    if (!persistedAuthData) {
+      return undefined
+    }
+
+    // In local storage mode the workspaceState selection is the durable owner
+    // of this workspace's runtime auth. The auth.json file is only a runtime
+    // projection consumed by Codex terminals, so it can drift after first-open
+    // global seeding, deletion, invalid edits, or another saved profile being
+    // written into the same workspace. Restore it from the saved profile
+    // instead of letting a stale runtime copy silently redefine the workspace
+    // selection.
+    this.syncRuntimeAuth(persistedAuthData, persistedProfile.id)
+
+    return {
+      kind: 'matchedProfile',
+      authPath,
+      authData: persistedAuthData,
+      matchedProfileId: persistedProfile.id,
+    }
+  }
+
   async getRuntimeSession(
     profiles?: ProfileSummary[],
   ): Promise<RuntimeSession> {
     const resolvedProfiles = profiles || (await this.listProfiles())
-    const authPath = getDefaultCodexAuthPath()
+    const authPath = this.getRuntimeAuthPath()
     const authData = await loadAuthDataFromFile(authPath)
     const persistedActiveProfileId = await this.getPersistedActiveProfileId()
 
@@ -488,6 +621,16 @@ export class ProfileManager {
         this.matchesAuth(profile, authData),
       )
       if (match) {
+        const restoredSession = await this.restorePersistedActiveRuntimeAuth(
+          resolvedProfiles,
+          persistedActiveProfileId,
+          authPath,
+          match.id,
+        )
+        if (restoredSession) {
+          return restoredSession
+        }
+
         if (this.isRemoteFilesMode()) {
           const sharedActiveProfile = this.readSharedActiveProfile()
           if (sharedActiveProfile?.profileId !== match.id) {
@@ -495,20 +638,18 @@ export class ProfileManager {
           }
         }
 
-        return {
-          kind: 'matchedProfile',
+        return this.buildMatchedRuntimeSession(
+          resolvedProfiles,
+          persistedActiveProfileId,
           authPath,
           authData,
-          matchedProfileId: match.id,
-          warningMessage: this.buildRuntimeWarningMessage(
-            resolvedProfiles,
-            persistedActiveProfileId,
-            'matchedProfile',
-            match.id,
-          ),
-        }
+          match.id,
+        )
       }
 
+      // A valid auth.json that does not match any saved profile is usually a
+      // fresh `codex login` session. Keep it visible as external auth so the
+      // user can import or replace a profile instead of losing that new login.
       return {
         kind: 'externalAuth',
         authPath,
@@ -519,6 +660,15 @@ export class ProfileManager {
           'externalAuth',
         ),
       }
+    }
+
+    const restoredSession = await this.restorePersistedActiveRuntimeAuth(
+      resolvedProfiles,
+      persistedActiveProfileId,
+      authPath,
+    )
+    if (restoredSession) {
+      return restoredSession
     }
 
     return {
@@ -677,7 +827,9 @@ export class ProfileManager {
   async listProfiles(): Promise<ProfileSummary[]> {
     await this.tryMigrateLegacyProfilesOnce()
     const file = await this.readProfilesFile()
-    return [...file.profiles].sort((a, b) => a.name.localeCompare(b.name))
+    return [...file.profiles].sort((a, b) =>
+      getProfilePrimaryLabel(a).localeCompare(getProfilePrimaryLabel(b)),
+    )
   }
 
   async getProfile(profileId: string): Promise<ProfileSummary | undefined> {
@@ -853,7 +1005,7 @@ export class ProfileManager {
   ): Promise<AuthData | null> {
     const profile = await this.getProfile(profileId)
     const recoverLabel = vscode.l10n.t('Recover from remote store')
-    const importLabel = vscode.l10n.t('Import current ~/.codex/auth.json')
+    const importLabel = vscode.l10n.t('Import current runtime auth.json')
     const deleteLabel = vscode.l10n.t('Delete broken profile')
 
     const canRecoverFromRemote =
@@ -880,12 +1032,13 @@ export class ProfileManager {
     }
 
     if (pick === importLabel) {
-      const authData = await loadAuthDataFromFile(getDefaultCodexAuthPath())
+      const authPath = this.getRuntimeAuthPath()
+      const authData = await loadAuthDataFromFile(authPath)
       if (!authData) {
         void vscode.window.showErrorMessage(
           vscode.l10n.t(
             'Could not read auth from {0}. Run "codex login" first.',
-            getDefaultCodexAuthPath(),
+            authPath,
           ),
         )
         return null
@@ -955,9 +1108,9 @@ export class ProfileManager {
       return true
     }
 
-    // Once isolated runtime support is removed, the active local profile owns
-    // the runtime auth file unconditionally. Keeping this sync eager ensures
-    // background token renewal cannot leave auth.json behind the saved profile.
+    // The active local profile owns this window's runtime auth projection.
+    // Keeping this sync eager ensures background token renewal cannot leave the
+    // workspace auth.json behind the saved profile token payload.
     this.syncRuntimeAuth(authData, profileId)
     return true
   }
@@ -1073,13 +1226,10 @@ export class ProfileManager {
     profileId: string,
     task: () => Promise<T>,
   ): Promise<{ acquired: boolean; value?: T }> {
-    if (!this.isRemoteFilesMode()) {
-      return {
-        acquired: true,
-        value: await task(),
-      }
-    }
-
+    // Use file-based lease in all storage modes to prevent simultaneous token
+    // renewal across multiple VS Code windows (each window runs its own timer).
+    // Remote mode already relied on this; local secretStorage mode previously
+    // skipped it, causing redundant concurrent renewals and token-rotation races.
     const leasePath = getSharedProfileRenewLeasePath(profileId)
     const acquired = acquireJsonLease(
       leasePath,
@@ -1175,7 +1325,10 @@ export class ProfileManager {
     return ok ? last : undefined
   }
 
-  createWatchers(onChanged: () => void): vscode.Disposable[] {
+  createWatchers(
+    onChanged: () => void,
+    inheritedAuthPath?: string,
+  ): vscode.Disposable[] {
     const disposables: vscode.Disposable[] = []
     const fire = () => {
       try {
@@ -1185,14 +1338,28 @@ export class ProfileManager {
       }
     }
 
-    const authDir = path.dirname(getDefaultCodexAuthPath())
+    const inheritedRuntimeAuthPath = inheritedAuthPath || getDefaultCodexAuthPath()
+    const globalAuthDir = path.dirname(inheritedRuntimeAuthPath)
     const authWatcher = vscode.workspace.createFileSystemWatcher(
-      new vscode.RelativePattern(vscode.Uri.file(authDir), 'auth.json'),
+      new vscode.RelativePattern(vscode.Uri.file(globalAuthDir), 'auth.json'),
     )
     authWatcher.onDidCreate(fire)
     authWatcher.onDidChange(fire)
     authWatcher.onDidDelete(fire)
     disposables.push(authWatcher)
+
+    // Also watch the workspace-specific auth.json for per-window isolation.
+    const wsAuthPath = this.getRuntimeAuthPath()
+    const wsAuthDir = path.dirname(wsAuthPath)
+    if (wsAuthDir !== globalAuthDir) {
+      const wsAuthWatcher = vscode.workspace.createFileSystemWatcher(
+        new vscode.RelativePattern(vscode.Uri.file(wsAuthDir), 'auth.json'),
+      )
+      wsAuthWatcher.onDidCreate(fire)
+      wsAuthWatcher.onDidChange(fire)
+      wsAuthWatcher.onDidDelete(fire)
+      disposables.push(wsAuthWatcher)
+    }
 
     if (this.isRemoteFilesMode()) {
       const profilesWatcher = vscode.workspace.createFileSystemWatcher(

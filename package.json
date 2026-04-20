@@ -7,7 +7,7 @@
   },
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "3.0.3",
+  "version": "4.0.11",
   "license": "MIT",
   "publisher": "woozy-masta",
   "files": [
@@ -43,7 +43,7 @@
   ],
   "icon": "resources/codex-switch.png",
   "activationEvents": [
-    "onStartupFinished",
+    "*",
     "onView:codexSwitchProfiles"
   ],
   "main": "./out/extension.js",
@@ -86,6 +86,24 @@
         "title": "%command.profile.manage.title%",
         "category": "Codex Switch",
         "icon": "$(settings-gear)"
+      },
+      {
+        "command": "codex-switch.profile.enableWorkspaceSpecificCodexHome",
+        "title": "%command.profile.enableWorkspaceSpecificCodexHome.title%",
+        "category": "Codex Switch",
+        "icon": "$(check)"
+      },
+      {
+        "command": "codex-switch.profile.disableWorkspaceSpecificCodexHome",
+        "title": "%command.profile.disableWorkspaceSpecificCodexHome.title%",
+        "category": "Codex Switch",
+        "icon": "$(circle-slash)"
+      },
+      {
+        "command": "codex-switch.profile.copyWorkspaceCodexHome",
+        "title": "%command.profile.copyWorkspaceCodexHome.title%",
+        "category": "Codex Switch",
+        "icon": "$(copy)"
       },
       {
         "command": "codex-switch.profile.login",
@@ -192,34 +210,49 @@
           "group": "navigation@1"
         },
         {
-          "command": "codex-switch.reloadWindow",
-          "when": "view == codexSwitchProfiles",
+          "command": "codex-switch.profile.enableWorkspaceSpecificCodexHome",
+          "when": "view == codexSwitchProfiles && !config.codexSwitch.workspaceSpecificCodexHome",
           "group": "navigation@2"
         },
         {
-          "command": "codex-switch.profile.addFromFile",
-          "when": "view == codexSwitchProfiles",
+          "command": "codex-switch.profile.disableWorkspaceSpecificCodexHome",
+          "when": "view == codexSwitchProfiles && config.codexSwitch.workspaceSpecificCodexHome",
           "group": "navigation@3"
         },
         {
-          "command": "codex-switch.profile.addFromCodexAuthFile",
-          "when": "view == codexSwitchProfiles",
+          "command": "codex-switch.profile.copyWorkspaceCodexHome",
+          "when": "view == codexSwitchProfiles && config.codexSwitch.workspaceSpecificCodexHome",
           "group": "navigation@4"
         },
         {
-          "command": "codex-switch.profile.refreshAll",
+          "command": "codex-switch.reloadWindow",
           "when": "view == codexSwitchProfiles",
           "group": "navigation@5"
         },
         {
-          "command": "codex-switch.profile.expandAll",
+          "command": "codex-switch.profile.addFromFile",
           "when": "view == codexSwitchProfiles",
           "group": "navigation@6"
         },
         {
-          "command": "codex-switch.profile.exportSettings",
+          "command": "codex-switch.profile.addFromCodexAuthFile",
           "when": "view == codexSwitchProfiles",
           "group": "navigation@7"
+        },
+        {
+          "command": "codex-switch.profile.refreshAll",
+          "when": "view == codexSwitchProfiles",
+          "group": "navigation@8"
+        },
+        {
+          "command": "codex-switch.profile.expandAll",
+          "when": "view == codexSwitchProfiles",
+          "group": "navigation@9"
+        },
+        {
+          "command": "codex-switch.profile.exportSettings",
+          "when": "view == codexSwitchProfiles",
+          "group": "navigation@10"
         }
       ],
       "view/item/context": [
@@ -284,6 +317,12 @@
           ],
           "default": "auto",
           "description": "%configuration.storageMode.description%"
+        },
+        "codexSwitch.workspaceSpecificCodexHome": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "description": "%configuration.workspaceSpecificCodexHome.description%"
         },
         "codexSwitch.reloadWindowAfterProfileSwitch": {
           "type": "boolean",

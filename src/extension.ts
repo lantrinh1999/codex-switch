@@ -1,6 +1,7 @@
 import * as vscode from 'vscode'
 import { ProfileManager } from './auth/profile-manager'
 import { ProfileHealthService } from './health/profile-health-service'
+import { getDefaultCodexAuthPath } from './auth/auth-manager'
 import {
   createStatusBarItem,
   getStatusBarItem,
@@ -23,6 +24,52 @@ let refreshCoordinator: RefreshCoordinator | undefined
 let cachedProfiles: ProfileSummary[] = []
 let cachedRuntimeSession: RuntimeSession | null = null
 let lastWarningSignature: string | undefined
+let inheritedCodexHomeEnv: string | undefined
+let inheritedRuntimeAuthPath: string | undefined
+let runtimeWatchers: vscode.Disposable[] = []
+
+function disposeRuntimeWatchers() {
+  for (const watcher of runtimeWatchers) {
+    try {
+      watcher.dispose()
+    } catch {
+      // ignore watcher disposal failures
+    }
+  }
+  runtimeWatchers = []
+}
+
+function restoreInheritedCodexHome(context: vscode.ExtensionContext): void {
+  if (typeof inheritedCodexHomeEnv === 'string') {
+    process.env.CODEX_HOME = inheritedCodexHomeEnv
+    context.environmentVariableCollection?.replace(
+      'CODEX_HOME',
+      inheritedCodexHomeEnv,
+    )
+    return
+  }
+
+  delete process.env.CODEX_HOME
+  context.environmentVariableCollection?.delete?.('CODEX_HOME')
+}
+
+async function applyWorkspaceSpecificCodexHome(
+  context: vscode.ExtensionContext,
+): Promise<void> {
+  if (!profileManager) {
+    return
+  }
+
+  const wsCodexHome = profileManager.getWorkspaceCodexHome()
+  if (!wsCodexHome) {
+    restoreInheritedCodexHome(context)
+    return
+  }
+
+  process.env.CODEX_HOME = wsCodexHome
+  context.environmentVariableCollection?.replace('CODEX_HOME', wsCodexHome)
+  await profileManager.initWorkspaceAuth(inheritedRuntimeAuthPath)
+}
 
 export function activate(context: vscode.ExtensionContext) {
   debugLog('Codex Switch activated')
@@ -31,6 +78,9 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(statusBarItem)
 
   profileManager = new ProfileManager(context)
+  inheritedCodexHomeEnv = process.env.CODEX_HOME
+  inheritedRuntimeAuthPath = getDefaultCodexAuthPath()
+
   profileHealthService = new ProfileHealthService(profileManager)
   profileTreeProvider = new ProfileTreeProvider()
 
@@ -85,10 +135,24 @@ export function activate(context: vscode.ExtensionContext) {
     profileTreeProvider,
     profileTreeView,
   )
+  const rebuildRuntimeWatchers = () => {
+    disposeRuntimeWatchers()
+    if (!profileManager) {
+      return
+    }
+    runtimeWatchers = profileManager.createWatchers(
+      () => {
+        void refreshUi()
+      },
+      inheritedRuntimeAuthPath,
+    )
+  }
+  context.subscriptions.push({
+    dispose: () => {
+      disposeRuntimeWatchers()
+    },
+  })
   context.subscriptions.push(
-    ...profileManager.createWatchers(() => {
-      void refreshUi()
-    }),
     profileHealthService.onDidChangeState(() => {
       // Optimization note [2026-04-12 04:42 ICT]:
       // Health refreshes emit frequently per profile. Re-render from cached
@@ -98,6 +162,21 @@ export function activate(context: vscode.ExtensionContext) {
     }),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (
+        event.affectsConfiguration('codexSwitch.workspaceSpecificCodexHome') ||
+        event.affectsConfiguration('codexSwitch.storageMode')
+      ) {
+        void applyWorkspaceSpecificCodexHome(context)
+          .then(() => {
+            rebuildRuntimeWatchers()
+            return refreshCoordinator?.refreshUi()
+          })
+          .catch((error) => {
+            errorLog('Error applying workspace CODEX_HOME setting:', error)
+          })
+        return
+      }
+
+      if (
         event.affectsConfiguration('codexSwitch') ||
         event.affectsConfiguration('codexUsage')
       ) {
@@ -106,7 +185,17 @@ export function activate(context: vscode.ExtensionContext) {
     }),
   )
 
-  void refreshCoordinator.refreshAll()
+  const coordinator = refreshCoordinator
+  void applyWorkspaceSpecificCodexHome(context)
+    .then(() => {
+      rebuildRuntimeWatchers()
+      return coordinator.refreshAll()
+    })
+    .catch((error) => {
+      errorLog('Error initializing workspace CODEX_HOME:', error)
+      rebuildRuntimeWatchers()
+      void coordinator.refreshAll()
+    })
 }
 
 function renderProfileUi() {
@@ -183,6 +272,7 @@ export function deactivate() {
   if (statusBarItem) {
     statusBarItem.dispose()
   }
+  disposeRuntimeWatchers()
   profileHealthService?.dispose()
   profileTreeProvider?.dispose()
 }

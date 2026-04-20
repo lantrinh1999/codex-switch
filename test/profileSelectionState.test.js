@@ -139,9 +139,56 @@ async function withMockedVscode(vscodeMock, fn) {
   }
 }
 
-test('workspace-scoped active profile state migrates into global state', async () => {
+test('active profile selection is stored per-workspace in workspaceState', async () => {
   const tempDir = fs.mkdtempSync(
-    path.join(os.tmpdir(), 'codex-switch-state-migration-'),
+    path.join(os.tmpdir(), 'codex-switch-ws-active-'),
+  )
+  const codexHome = path.join(tempDir, 'codex-home')
+  const globalStoragePath = path.join(tempDir, 'storage')
+  fs.mkdirSync(globalStoragePath, { recursive: true })
+
+  const previousCodexHome = process.env.CODEX_HOME
+  process.env.CODEX_HOME = codexHome
+
+  try {
+    await withMockedVscode(createVscodeMock(), async () => {
+      const { ProfileManager } = require('../out/auth/profile-manager.js')
+      const context = createExtensionContext(globalStoragePath)
+      const profileManager = new ProfileManager(context)
+      const profile = await profileManager.createProfile(
+        'workspace-owned',
+        createAuthData('workspace@example.com'),
+      )
+
+      fs.mkdirSync(codexHome, { recursive: true })
+
+      // setActiveProfileId should write to workspaceState (per-window) and
+      // NOT touch globalState, ensuring each VS Code window is isolated.
+      await profileManager.setActiveProfileId(profile.id)
+
+      assert.equal(
+        context.workspaceState.get('codexSwitch.activeProfileId'),
+        profile.id,
+        'active profile must be stored in workspaceState for per-window isolation',
+      )
+      assert.equal(
+        context.globalState.get('codexSwitch.activeProfileId'),
+        undefined,
+        'globalState must not be written when saving per-window profile selection',
+      )
+    })
+  } finally {
+    if (typeof previousCodexHome === 'undefined') {
+      delete process.env.CODEX_HOME
+    } else {
+      process.env.CODEX_HOME = previousCodexHome
+    }
+  }
+})
+
+test('global state active profile migrates to workspaceState for per-window isolation', async () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'codex-switch-global-migrate-'),
   )
   const codexHome = path.join(tempDir, 'codex-home')
   const globalStoragePath = path.join(tempDir, 'storage')
@@ -157,34 +204,35 @@ test('workspace-scoped active profile state migrates into global state', async (
       const context = createExtensionContext(globalStoragePath)
       const profileManager = new ProfileManager(context)
       const profile = await profileManager.createProfile(
-        'workspace-owned',
-        createAuthData('workspace@example.com'),
+        'global-owned',
+        createAuthData('global@example.com'),
       )
 
-      // Migration note:
-      // Previous versions allowed the active profile selection to live in
-      // workspaceState when isolated runtime mode was enabled. The upgrade path
-      // now consolidates that value into globalState so removing isolated
-      // runtime support does not silently drop the active profile choice.
-      await context.workspaceState.update(
+      // Simulate state written by an older extension version (which used globalState).
+      await context.globalState.update(
         'codexSwitch.activeProfileId',
         profile.id,
       )
       fs.mkdirSync(codexHome, { recursive: true })
       fs.writeFileSync(
         path.join(codexHome, 'auth.json'),
-        buildCodexAuthJson(createAuthData('workspace@example.com')),
+        buildCodexAuthJson(createAuthData('global@example.com')),
         'utf8',
       )
 
       assert.equal(await profileManager.getActiveProfileId(), profile.id)
+
+      // The value should be promoted to workspaceState so this window is now isolated.
+      assert.equal(
+        context.workspaceState.get('codexSwitch.activeProfileId'),
+        profile.id,
+        'global state value must be migrated to workspaceState',
+      )
+      // globalState is left intact so other workspace windows can also migrate.
       assert.equal(
         context.globalState.get('codexSwitch.activeProfileId'),
         profile.id,
-      )
-      assert.equal(
-        context.workspaceState.get('codexSwitch.activeProfileId'),
-        undefined,
+        'globalState must remain for other windows to migrate from',
       )
     })
   } finally {
@@ -196,9 +244,9 @@ test('workspace-scoped active profile state migrates into global state', async (
   }
 })
 
-test('workspace-scoped last profile state migrates into global state', async () => {
+test('last profile selection is stored per-workspace in workspaceState', async () => {
   const tempDir = fs.mkdtempSync(
-    path.join(os.tmpdir(), 'codex-switch-last-state-migration-'),
+    path.join(os.tmpdir(), 'codex-switch-ws-last-'),
   )
   const globalStoragePath = path.join(tempDir, 'storage')
   fs.mkdirSync(globalStoragePath, { recursive: true })
@@ -208,10 +256,7 @@ test('workspace-scoped last profile state migrates into global state', async () 
     const context = createExtensionContext(globalStoragePath)
     const profileManager = new ProfileManager(context)
 
-    // Migration note:
-    // The "last profile" pointer powers toggle behavior, so it needs the same
-    // upgrade path as the active profile state when retiring workspace-scoped
-    // persistence.
+    // Simulate a direct workspaceState write (as the extension now does).
     await context.workspaceState.update(
       'codexSwitch.lastProfileId',
       'workspace-last-profile',
@@ -220,14 +265,17 @@ test('workspace-scoped last profile state migrates into global state', async () 
     assert.equal(
       await profileManager.getLastProfileId(),
       'workspace-last-profile',
+      'last profile must be read from workspaceState',
     )
     assert.equal(
       context.globalState.get('codexSwitch.lastProfileId'),
-      'workspace-last-profile',
+      undefined,
+      'globalState must not be written for the last profile pointer',
     )
     assert.equal(
       context.workspaceState.get('codexSwitch.lastProfileId'),
-      undefined,
+      'workspace-last-profile',
+      'workspaceState must retain the last profile value',
     )
   })
 })

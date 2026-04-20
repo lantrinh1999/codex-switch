@@ -10,6 +10,7 @@ import {
   TokenStatus,
 } from '../types'
 import { loadAuthDataFromJson, parseJWT } from '../auth/auth-parser'
+import { getProfilePrimaryLabel } from '../profile-labels'
 
 const TOKEN_URL = 'https://auth.openai.com/oauth/token'
 const USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage'
@@ -512,10 +513,7 @@ export function getQuotaWindowLabel(window: QuotaWindowInfo): string {
   }
 
   const hours = window.windowSeconds / 3600
-  if (hours <= 5) {
-    return '5h'
-  }
-  if (hours <= 24) {
+  if (hours < 24) {
     return `${Math.round(hours)}h`
   }
   return `${Math.round(hours / 24)}d`
@@ -611,7 +609,9 @@ export function pickBestQuotaProfileId(
         return rightIsActive - leftIsActive
       }
 
-      return left.profile.name.localeCompare(right.profile.name)
+      return getProfilePrimaryLabel(left.profile).localeCompare(
+        getProfilePrimaryLabel(right.profile),
+      )
     })
 
   return ranked[0]?.profile.id

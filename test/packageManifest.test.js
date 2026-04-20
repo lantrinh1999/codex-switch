@@ -11,6 +11,13 @@ function getCommandContribution(command) {
   return manifest.contributes.commands.find((item) => item.command === command)
 }
 
+test('extension activates eagerly to claim workspace CODEX_HOME before other consumers', () => {
+  assert.deepEqual(manifest.activationEvents, [
+    '*',
+    'onView:codexSwitchProfiles',
+  ])
+})
+
 test('profiles sidebar view container is contributed', () => {
   const activitybar = manifest.contributes.viewsContainers.activitybar
   assert.deepEqual(activitybar, [
@@ -34,11 +41,18 @@ test('profiles sidebar view container is contributed', () => {
 test('profiles sidebar view title exposes the expected commands', () => {
   const titleMenus = manifest.contributes.menus['view/title'] ?? []
   const commands = titleMenus
-    .filter((item) => item.when === 'view == codexSwitchProfiles')
+    .filter(
+      (item) =>
+        typeof item.when === 'string' &&
+        item.when.includes('view == codexSwitchProfiles'),
+    )
     .map((item) => item.command)
 
   assert.deepEqual(commands, [
     'codex-switch.profile.manage',
+    'codex-switch.profile.enableWorkspaceSpecificCodexHome',
+    'codex-switch.profile.disableWorkspaceSpecificCodexHome',
+    'codex-switch.profile.copyWorkspaceCodexHome',
     'codex-switch.reloadWindow',
     'codex-switch.profile.addFromFile',
     'codex-switch.profile.addFromCodexAuthFile',
@@ -51,6 +65,9 @@ test('profiles sidebar view title exposes the expected commands', () => {
 test('profiles sidebar commands use native action icons', () => {
   const expectedIcons = new Map([
     ['codex-switch.profile.manage', '$(settings-gear)'],
+    ['codex-switch.profile.enableWorkspaceSpecificCodexHome', '$(check)'],
+    ['codex-switch.profile.disableWorkspaceSpecificCodexHome', '$(circle-slash)'],
+    ['codex-switch.profile.copyWorkspaceCodexHome', '$(copy)'],
     ['codex-switch.reloadWindow', '$(debug-restart)'],
     ['codex-switch.profile.addFromFile', '$(folder-opened)'],
     ['codex-switch.profile.addFromCodexAuthFile', '$(add)'],
@@ -114,6 +131,17 @@ test('profile item context menu exposes switch and refresh actions', () => {
         'view == codexSwitchProfiles && viewItem == profileCopyableField',
   )
   assert.equal(copyAction?.group, 'context@1')
+})
+
+test('workspace-specific CODEX_HOME setting is contributed', () => {
+  const setting =
+    manifest.contributes.configuration.properties[
+      'codexSwitch.workspaceSpecificCodexHome'
+    ]
+
+  assert.equal(setting?.type, 'boolean')
+  assert.equal(setting?.default, true)
+  assert.equal(setting?.scope, 'window')
 })
 
 test('quota refresh interval setting is contributed', () => {

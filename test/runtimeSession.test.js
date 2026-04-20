@@ -262,6 +262,112 @@ test('runtime session falls back to external auth when auth.json changes outside
   }
 })
 
+test('runtime session restores the workspace active profile when auth.json matches another saved profile', async () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'codex-switch-runtime-restore-saved-'),
+  )
+  const codexHome = path.join(tempDir, 'codex-home')
+  const globalStoragePath = path.join(tempDir, 'storage')
+  fs.mkdirSync(globalStoragePath, { recursive: true })
+
+  const previousCodexHome = process.env.CODEX_HOME
+  process.env.CODEX_HOME = codexHome
+
+  try {
+    await withMockedVscode(createVscodeMock(), async () => {
+      const { ProfileManager } = require('../out/auth/profile-manager.js')
+      const { buildCodexAuthJson } = require('../out/auth/codex-auth-sync.js')
+      const context = createExtensionContext(globalStoragePath)
+      const profileManager = new ProfileManager(context)
+
+      const workspaceProfile = await profileManager.createProfile(
+        'workspace-owner',
+        createAuthData('workspace@example.com', 'refresh-workspace'),
+      )
+      const strayProfile = await profileManager.createProfile(
+        'stray-runtime',
+        createAuthData('stray@example.com', 'refresh-stray'),
+      )
+      assert.equal(
+        await profileManager.setActiveProfileId(workspaceProfile.id),
+        true,
+      )
+
+      fs.mkdirSync(codexHome, { recursive: true })
+      fs.writeFileSync(
+        path.join(codexHome, 'auth.json'),
+        buildCodexAuthJson(await profileManager.loadAuthData(strayProfile.id)),
+        'utf8',
+      )
+
+      const runtimeSession = await profileManager.getRuntimeSession()
+      assert.equal(runtimeSession.kind, 'matchedProfile')
+      assert.equal(runtimeSession.matchedProfileId, workspaceProfile.id)
+      assert.equal(runtimeSession.authData.email, 'workspace@example.com')
+      assert.equal(runtimeSession.warningMessage, undefined)
+      assert.equal(
+        context.workspaceState.get('codexSwitch.activeProfileId'),
+        workspaceProfile.id,
+      )
+
+      const authJson = JSON.parse(
+        fs.readFileSync(path.join(codexHome, 'auth.json'), 'utf8'),
+      )
+      assert.equal(authJson.tokens.refresh_token, 'refresh-workspace')
+    })
+  } finally {
+    if (typeof previousCodexHome === 'undefined') {
+      delete process.env.CODEX_HOME
+    } else {
+      process.env.CODEX_HOME = previousCodexHome
+    }
+  }
+})
+
+test('runtime session recreates missing auth.json from the workspace active profile', async () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'codex-switch-runtime-restore-missing-'),
+  )
+  const codexHome = path.join(tempDir, 'codex-home')
+  const globalStoragePath = path.join(tempDir, 'storage')
+  fs.mkdirSync(globalStoragePath, { recursive: true })
+
+  const previousCodexHome = process.env.CODEX_HOME
+  process.env.CODEX_HOME = codexHome
+
+  try {
+    await withMockedVscode(createVscodeMock(), async () => {
+      const { ProfileManager } = require('../out/auth/profile-manager.js')
+      const context = createExtensionContext(globalStoragePath)
+      const profileManager = new ProfileManager(context)
+      const profile = await profileManager.createProfile(
+        'workspace-owner',
+        createAuthData('workspace@example.com', 'refresh-workspace'),
+      )
+
+      assert.equal(await profileManager.setActiveProfileId(profile.id), true)
+      fs.unlinkSync(path.join(codexHome, 'auth.json'))
+
+      const runtimeSession = await profileManager.getRuntimeSession()
+      assert.equal(runtimeSession.kind, 'matchedProfile')
+      assert.equal(runtimeSession.matchedProfileId, profile.id)
+      assert.equal(runtimeSession.authData.email, 'workspace@example.com')
+      assert.equal(runtimeSession.warningMessage, undefined)
+
+      const authJson = JSON.parse(
+        fs.readFileSync(path.join(codexHome, 'auth.json'), 'utf8'),
+      )
+      assert.equal(authJson.tokens.refresh_token, 'refresh-workspace')
+    })
+  } finally {
+    if (typeof previousCodexHome === 'undefined') {
+      delete process.env.CODEX_HOME
+    } else {
+      process.env.CODEX_HOME = previousCodexHome
+    }
+  }
+})
+
 test('deleting the saved active profile preserves runtime auth as an external session', async () => {
   const tempDir = fs.mkdtempSync(
     path.join(os.tmpdir(), 'codex-switch-runtime-delete-'),
@@ -310,8 +416,8 @@ test('status bar and profile tree stay consistent across matched, external, and 
     const profiles = [
       {
         id: 'profile-1',
-        name: 'Work',
-        email: 'work@example.com',
+        name: 'fangfangpremium+1',
+        email: 'fangfangpremium+3@gmail.com',
         planType: 'plus',
         createdAt: '2026-04-12T00:00:00.000Z',
         updatedAt: '2026-04-12T00:00:00.000Z',
@@ -321,13 +427,16 @@ test('status bar and profile tree stay consistent across matched, external, and 
     const matchedSession = {
       kind: 'matchedProfile',
       authPath: '/tmp/auth.json',
-      authData: createAuthData('work@example.com'),
+      authData: createAuthData('fangfangpremium+3@gmail.com'),
       matchedProfileId: 'profile-1',
     }
     treeProvider.setState(profiles, matchedSession, new Map())
     statusBarModule.updateProfileStatus(matchedSession, profiles)
-    assert.match(statusBarItem.text, /Work/)
+    assert.match(statusBarItem.text, /fangfangpremium\+3/)
+    assert.equal(statusBarItem.command, 'codex-switch.profile.manage')
     assert.equal(treeProvider.getRootItems().length, 1)
+    assert.equal(treeProvider.getRootItems()[0].label, 'fangfangpremium+3')
+    assert.match(String(treeProvider.getRootItems()[0].description), /\+1/)
 
     const externalSession = {
       kind: 'externalAuth',
@@ -337,7 +446,8 @@ test('status bar and profile tree stay consistent across matched, external, and 
     }
     treeProvider.setState(profiles, externalSession, new Map())
     statusBarModule.updateProfileStatus(externalSession, profiles)
-    assert.match(statusBarItem.text, /External/)
+    assert.match(statusBarItem.text, /external/)
+    assert.equal(statusBarItem.command, 'codex-switch.profile.statusBarAction')
     assert.equal(treeProvider.getRootItems()[0].label, 'Runtime auth')
     treeProvider.setExpanded('__runtime__', true)
     treeProvider.setState(profiles, externalSession, new Map())
@@ -351,6 +461,7 @@ test('status bar and profile tree stay consistent across matched, external, and 
     treeProvider.setState(profiles, noAuthSession, new Map())
     statusBarModule.updateProfileStatus(noAuthSession, profiles)
     assert.match(statusBarItem.text, /none/i)
+    assert.equal(statusBarItem.command, 'codex-switch.profile.statusBarAction')
     assert.equal(treeProvider.getRootItems()[0].label, 'Runtime auth')
   })
 })

@@ -4,7 +4,6 @@ import * as path from 'path'
 import * as os from 'os'
 import { ProfileManager } from '../auth/profile-manager'
 import {
-  getDefaultCodexAuthPath,
   loadAuthDataFromFile,
   shouldUseWslAuthPath,
 } from '../auth/auth-manager'
@@ -12,6 +11,12 @@ import { pickBestQuotaProfileId } from '../health/profile-health'
 import { ProfileSummary, RuntimeSession } from '../types'
 import { RefreshCoordinator } from '../ui/refresh-coordinator'
 import { ProfileTreeNode, ProfileTreeProvider } from '../ui/profile-tree'
+import {
+  getProfileAlias,
+  getProfileFullEmail,
+  getProfilePrimaryLabel,
+  getRuntimePrimaryLabel,
+} from '../profile-labels'
 
 type StatusBarClickBehavior = 'cycle' | 'toggleLast' | 'bestQuota'
 type StatusBarSwitchTrigger = 'click' | 'doubleClick'
@@ -90,6 +95,24 @@ function getStatusBarSwitchTrigger(): StatusBarSwitchTrigger {
   return raw === 'doubleClick' ? 'doubleClick' : 'click'
 }
 
+function hasWorkspaceConfigurationTarget(): boolean {
+  return Boolean(
+    vscode.workspace.workspaceFile || vscode.workspace.workspaceFolders?.length,
+  )
+}
+
+async function updateWorkspaceSpecificCodexHomeSetting(
+  enabled: boolean,
+): Promise<void> {
+  await vscode.workspace
+    .getConfiguration('codexSwitch')
+    .update(
+      'workspaceSpecificCodexHome',
+      enabled,
+      !hasWorkspaceConfigurationTarget(),
+    )
+}
+
 function clearPendingStatusBarClick(): void {
   pendingStatusBarClickAt = 0
   if (pendingStatusBarClickTimer) {
@@ -114,25 +137,27 @@ async function getProfileQuickPickItems(
   const profiles = await profileManager.listProfiles()
   const runtimeSession = await profileManager.getRuntimeSession(profiles)
   const items: ProfileQuickPickItem[] = profiles.map((profile) => ({
-    label: profile.name,
-    description:
-      profile.email && profile.email !== 'Unknown' ? profile.email : undefined,
-    detail:
+    label: getProfilePrimaryLabel(profile),
+    description: getProfileAlias(profile),
+    detail: [
+      (() => {
+        const email = getProfileFullEmail(profile)
+        return email && email !== getProfilePrimaryLabel(profile) ? email : undefined
+      })(),
       runtimeSession.kind === 'matchedProfile' &&
       profile.id === runtimeSession.matchedProfileId
         ? vscode.l10n.t('Runtime active')
         : undefined,
+    ]
+      .filter(Boolean)
+      .join(' · '),
     profileId: profile.id,
   }))
 
   if (runtimeSession.kind === 'externalAuth') {
     items.unshift({
-      label: vscode.l10n.t('Current runtime auth'),
-      description:
-        runtimeSession.authData?.email &&
-        runtimeSession.authData.email !== 'Unknown'
-          ? runtimeSession.authData.email
-          : undefined,
+      label: getRuntimePrimaryLabel(runtimeSession),
+      description: vscode.l10n.t('Current runtime auth'),
       detail: vscode.l10n.t('External auth.json session is active'),
       profileId: '__runtime_external__',
       isInfoItem: true,
@@ -161,11 +186,14 @@ async function pickProfile(
     const profile = await profileManager.getProfile(targetId)
     if (profile) {
       return {
-        label: profile.name,
-        description:
-          profile.email && profile.email !== 'Unknown'
-            ? profile.email
-            : undefined,
+        label: getProfilePrimaryLabel(profile),
+        description: getProfileAlias(profile),
+        detail: (() => {
+          const email = getProfileFullEmail(profile)
+          return email && email !== getProfilePrimaryLabel(profile)
+            ? email
+            : undefined
+        })(),
         profileId: profile.id,
       }
     }
@@ -216,10 +244,15 @@ async function afterProfileChange(
 }
 
 function getProfileNotificationName(
-  profile: Pick<ProfileSummary, 'name'> | undefined,
+  profile: Pick<ProfileSummary, 'name' | 'email'> | undefined,
   fallbackProfileId: string,
 ): string {
-  return profile?.name || fallbackProfileId
+  if (!profile) {
+    return fallbackProfileId
+  }
+
+  const label = getProfilePrimaryLabel(profile)
+  return label && label !== 'Unknown' ? label : fallbackProfileId
 }
 
 function showActionInformationMessage(message: string): void {
@@ -230,7 +263,7 @@ function showActionInformationMessage(message: string): void {
 // follow-up refreshes triggered as part of a larger action stay silent so the
 // user gets one clear confirmation instead of multiple stacked notifications.
 function notifyProfileActivated(
-  profile: Pick<ProfileSummary, 'name'> | undefined,
+  profile: Pick<ProfileSummary, 'name' | 'email'> | undefined,
   fallbackProfileId: string,
 ): void {
   showActionInformationMessage(
@@ -456,7 +489,7 @@ export function registerCommands(
   const addFromCodexAuthFileCommand = vscode.commands.registerCommand(
     'codex-switch.profile.addFromCodexAuthFile',
     async () => {
-      const authPath = getDefaultCodexAuthPath()
+      const authPath = profileManager.getRuntimeAuthPath()
       const loginCommandText = getLoginCommandText()
       const authData = await loadAuthDataFromFile(authPath)
       if (!authData) {
@@ -476,7 +509,7 @@ export function registerCommands(
         const pick = await vscode.window.showWarningMessage(
           vscode.l10n.t(
             'This account is already saved as profile "{0}". Replace it?',
-            existing.name,
+            getProfileNotificationName(existing, existing.id),
           ),
           { modal: true },
           replaceLabel,
@@ -494,7 +527,7 @@ export function registerCommands(
         showActionInformationMessage(
           vscode.l10n.t(
             'Updated profile "{0}" from current auth.json and set it active.',
-            existing.name,
+            getProfileNotificationName(existing, existing.id),
           ),
         )
         await maybeReloadWindowAfterProfileSwitch()
@@ -535,7 +568,7 @@ export function registerCommands(
   const loginViaCliCommand = vscode.commands.registerCommand(
     'codex-switch.profile.login',
     async () => {
-      const authPath = getDefaultCodexAuthPath()
+      const authPath = profileManager.getRuntimeAuthPath()
       const loginSequence = `${getLoginCommandText()}\n`
 
       void vscode.commands.executeCommand('workbench.action.terminal.new')
@@ -663,7 +696,7 @@ export function registerCommands(
         const pick = await vscode.window.showWarningMessage(
           vscode.l10n.t(
             'This account is already saved as profile "{0}". Replace it?',
-            existing.name,
+            getProfileNotificationName(existing, existing.id),
           ),
           { modal: true },
           replaceLabel,
@@ -681,7 +714,7 @@ export function registerCommands(
         showActionInformationMessage(
           vscode.l10n.t(
             'Updated profile "{0}" from file and set it active.',
-            existing.name,
+            getProfileNotificationName(existing, existing.id),
           ),
         )
         await maybeReloadWindowAfterProfileSwitch()
@@ -936,6 +969,56 @@ export function registerCommands(
     },
   )
 
+  const copyWorkspaceCodexHomeCommand = vscode.commands.registerCommand(
+    'codex-switch.profile.copyWorkspaceCodexHome',
+    async () => {
+      if (!profileManager.isWorkspaceSpecificCodexHomeConfigured()) {
+        void vscode.window.showErrorMessage(
+          vscode.l10n.t('Workspace-specific CODEX_HOME is disabled in settings.'),
+        )
+        return
+      }
+
+      const workspaceCodexHome = profileManager.getWorkspaceCodexHome()
+      if (!workspaceCodexHome) {
+        void vscode.window.showErrorMessage(
+          vscode.l10n.t(
+            'Workspace-specific CODEX_HOME is unavailable in this window.',
+          ),
+        )
+        return
+      }
+
+      await vscode.env.clipboard.writeText(workspaceCodexHome)
+      showActionInformationMessage(
+        vscode.l10n.t(
+          'Copied workspace CODEX_HOME to clipboard: {0}',
+          workspaceCodexHome,
+        ),
+      )
+    },
+  )
+
+  const enableWorkspaceSpecificCodexHomeCommand = vscode.commands.registerCommand(
+    'codex-switch.profile.enableWorkspaceSpecificCodexHome',
+    async () => {
+      await updateWorkspaceSpecificCodexHomeSetting(true)
+      showActionInformationMessage(
+        vscode.l10n.t('Enabled workspace-specific CODEX_HOME.'),
+      )
+    },
+  )
+
+  const disableWorkspaceSpecificCodexHomeCommand = vscode.commands.registerCommand(
+    'codex-switch.profile.disableWorkspaceSpecificCodexHome',
+    async () => {
+      await updateWorkspaceSpecificCodexHomeSetting(false)
+      showActionInformationMessage(
+        vscode.l10n.t('Disabled workspace-specific CODEX_HOME.'),
+      )
+    },
+  )
+
   const reloadWindowCommand = vscode.commands.registerCommand(
     'codex-switch.reloadWindow',
     async () => {
@@ -946,7 +1029,7 @@ export function registerCommands(
   const manageProfilesCommand = vscode.commands.registerCommand(
     'codex-switch.profile.manage',
     async () => {
-      const authPath = getDefaultCodexAuthPath()
+      const authPath = profileManager.getRuntimeAuthPath()
       const profiles = await profileManager.listProfiles()
       const hasProfiles = profiles.length > 0
 
@@ -1027,6 +1110,9 @@ export function registerCommands(
     refreshAllCommand,
     expandAllProfilesCommand,
     copyValueCommand,
+    enableWorkspaceSpecificCodexHomeCommand,
+    disableWorkspaceSpecificCodexHomeCommand,
+    copyWorkspaceCodexHomeCommand,
     reloadWindowCommand,
   )
 }

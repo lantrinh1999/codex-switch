@@ -2,9 +2,30 @@ import * as vscode from 'vscode'
 import { ProfileHealthState, ProfileSummary, RuntimeSession } from '../types'
 import { formatQuotaSummary } from '../health/profile-health'
 import { createProfileTooltip } from './tooltip-builder'
+import { getRuntimePrimaryLabel } from '../profile-labels'
 
 let statusBarItem: vscode.StatusBarItem
 let cachedProfiles: ProfileSummary[] = []
+
+function getStatusBarCommand(
+  runtimeSession: RuntimeSession | null,
+  profiles: ProfileSummary[],
+  activeProfile?: ProfileSummary | null,
+): string {
+  if (profiles.length === 0) {
+    return 'codex-switch.profile.manage'
+  }
+
+  if (
+    runtimeSession?.kind === 'matchedProfile' &&
+    activeProfile &&
+    profiles.length <= 1
+  ) {
+    return 'codex-switch.profile.manage'
+  }
+
+  return 'codex-switch.profile.statusBarAction'
+}
 
 export function createStatusBarItem(): vscode.StatusBarItem {
   statusBarItem = vscode.window.createStatusBarItem(
@@ -31,19 +52,15 @@ export function updateProfileStatus(
 
   if (!runtimeSession || runtimeSession.kind === 'noAuth') {
     statusBarItem.text = `$(account) ${vscode.l10n.t('Codex: {0}', vscode.l10n.t('none'))}`
-    statusBarItem.command = 'codex-switch.profile.manage'
+    statusBarItem.command = getStatusBarCommand(runtimeSession, cachedProfiles)
     statusBarItem.tooltip = createProfileTooltip(runtimeSession, cachedProfiles)
     return
   }
 
   if (runtimeSession.kind === 'externalAuth') {
-    const plan =
-      runtimeSession.authData?.planType &&
-      runtimeSession.authData.planType !== 'Unknown'
-        ? runtimeSession.authData.planType
-        : vscode.l10n.t('external')
-    statusBarItem.text = `$(account) ${vscode.l10n.t('Codex: {0}', vscode.l10n.t('External'))} · ${plan}`
-    statusBarItem.command = 'codex-switch.profile.manage'
+    const runtimeLabel = getRuntimePrimaryLabel(runtimeSession)
+    statusBarItem.text = `$(account) ${vscode.l10n.t('Codex: {0}', runtimeLabel)} · ${vscode.l10n.t('External')}`
+    statusBarItem.command = getStatusBarCommand(runtimeSession, cachedProfiles)
     statusBarItem.tooltip = createProfileTooltip(runtimeSession, cachedProfiles)
     return
   }
@@ -53,20 +70,25 @@ export function updateProfileStatus(
       (profile) => profile.id === runtimeSession.matchedProfileId,
     ) || null
   if (!activeProfile) {
-    statusBarItem.text = `$(account) ${vscode.l10n.t('Codex: {0}', vscode.l10n.t('none'))}`
-    statusBarItem.command = 'codex-switch.profile.manage'
+    statusBarItem.text = `$(account) ${vscode.l10n.t(
+      'Codex: {0}',
+      getRuntimePrimaryLabel(runtimeSession),
+    )}`
+    statusBarItem.command = getStatusBarCommand(runtimeSession, cachedProfiles)
     statusBarItem.tooltip = createProfileTooltip(runtimeSession, cachedProfiles)
     return
   }
 
   const quotaSummary = formatQuotaSummary(healthState?.quotaInfo || null)
+  const runtimeLabel = getRuntimePrimaryLabel(runtimeSession, activeProfile)
   statusBarItem.text = quotaSummary
-    ? `$(account) ${vscode.l10n.t('Codex: {0}', activeProfile.name)} · ${quotaSummary}`
-    : `$(account) ${vscode.l10n.t('Codex: {0}', activeProfile.name)}`
-  statusBarItem.command =
-    cachedProfiles.length <= 1
-      ? 'codex-switch.profile.manage'
-      : 'codex-switch.profile.statusBarAction'
+    ? `$(account) ${vscode.l10n.t('Codex: {0}', runtimeLabel)} · ${quotaSummary}`
+    : `$(account) ${vscode.l10n.t('Codex: {0}', runtimeLabel)}`
+  statusBarItem.command = getStatusBarCommand(
+    runtimeSession,
+    cachedProfiles,
+    activeProfile,
+  )
   statusBarItem.tooltip = createProfileTooltip(runtimeSession, cachedProfiles)
 }
 
