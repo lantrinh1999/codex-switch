@@ -37,6 +37,10 @@ function createVscodeMock(options = {}) {
   const warningMessages = []
   const errorMessages = []
   const configurationUpdates = []
+  let commandDepth = 0
+  const commandStack = []
+  let reloadWindowCount = 0
+  let droppedReloadWindowCount = 0
   const configurationValues = new Map([
     ['codexSwitch.storageMode', options.storageMode ?? 'secretStorage'],
     ['codexSwitch.reloadWindowAfterProfileSwitch', false],
@@ -58,6 +62,12 @@ function createVscodeMock(options = {}) {
   return {
     registeredCommands,
     executedCommands,
+    get reloadWindowCount() {
+      return reloadWindowCount
+    },
+    get droppedReloadWindowCount() {
+      return droppedReloadWindowCount
+    },
     clipboardWrites,
     informationMessages,
     warningMessages,
@@ -79,6 +89,14 @@ function createVscodeMock(options = {}) {
         },
       },
       remoteName: undefined,
+    },
+    extensions: {
+      getExtension(id) {
+        if (id !== 'openai.chatgpt' || !options.openAiExtensionActive) {
+          return undefined
+        }
+        return { id, isActive: true }
+      },
     },
     Uri: {
       file(fsPath) {
@@ -145,11 +163,28 @@ function createVscodeMock(options = {}) {
       },
       async executeCommand(command, ...args) {
         executedCommands.push({ command, args })
+        if (command === 'workbench.action.reloadWindow') {
+          if (
+            options.ignoreNestedReloadWindow &&
+            commandStack.includes('codex-switch.profile.statusBarAction')
+          ) {
+            droppedReloadWindowCount += 1
+            return undefined
+          }
+          reloadWindowCount += 1
+        }
         const callback = registeredCommands.get(command)
         if (!callback) {
           return undefined
         }
-        return callback(...args)
+        commandDepth += 1
+        commandStack.push(command)
+        try {
+          return await callback(...args)
+        } finally {
+          commandStack.pop()
+          commandDepth -= 1
+        }
       },
     },
     RelativePattern: class RelativePattern {
@@ -181,6 +216,12 @@ async function withMockedVscode(vscodeMock, fn) {
   } finally {
     Module._load = originalLoad
   }
+}
+
+function countExecutedCommand(vscodeMock, command) {
+  return vscodeMock.executedCommands.filter(
+    (entry) => entry.command === command,
+  ).length
 }
 
 test('add from current auth imports the workspace runtime auth file', async () => {
@@ -728,6 +769,462 @@ test('status bar double-click can recover from no-auth by activating a saved pro
       )
       assert.equal(await profileManager.getActiveProfileId(), profile.id)
       assert.deepEqual(refreshCalls, ['ui', ['quota', profile.id]])
+    })
+  } finally {
+    if (typeof previousCodexHome === 'undefined') {
+      delete process.env.CODEX_HOME
+    } else {
+      process.env.CODEX_HOME = previousCodexHome
+    }
+  }
+})
+
+test('status bar switch reloads the window when the OpenAI Codex panel is active', async () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'codex-switch-status-bar-openai-reload-'),
+  )
+  const codexHome = path.join(tempDir, 'codex-home')
+  const globalStoragePath = path.join(tempDir, 'storage')
+  fs.mkdirSync(globalStoragePath, { recursive: true })
+
+  const previousCodexHome = process.env.CODEX_HOME
+  process.env.CODEX_HOME = codexHome
+
+  const vscodeMock = createVscodeMock({ openAiExtensionActive: true })
+  const context = {
+    subscriptions: [],
+    globalStorageUri: { fsPath: globalStoragePath },
+    secrets: {
+      values: new Map(),
+      async get(key) {
+        return this.values.get(key)
+      },
+      async store(key, value) {
+        this.values.set(key, value)
+      },
+      async delete(key) {
+        this.values.delete(key)
+      },
+    },
+    globalState: createMemento(),
+    workspaceState: createMemento(),
+  }
+
+  try {
+    await withMockedVscode(vscodeMock, async () => {
+      const { ProfileManager } = require('../out/auth/profile-manager.js')
+      const { registerCommands } = require('../out/commands/index.js')
+
+      const profileManager = new ProfileManager(context)
+      const refreshCalls = []
+      registerCommands(context, profileManager, {
+        async refreshUi() {
+          refreshCalls.push('ui')
+        },
+        async refreshAll() {},
+        async refreshQuota(profileId) {
+          refreshCalls.push(['quota', profileId])
+        },
+        async refreshToken() {
+          return true
+        },
+      })
+
+      const profileA = await profileManager.createProfile('first', {
+        idToken: makeJwt({
+          email: 'first@example.com',
+          'https://api.openai.com/auth': { chatgpt_plan_type: 'plus' },
+        }),
+        accessToken: makeJwt({
+          exp: Math.floor((Date.now() + 60 * 60 * 1000) / 1000),
+        }),
+        refreshToken: 'refresh-first',
+        email: 'first@example.com',
+        planType: 'plus',
+        authJson: {
+          tokens: { id_token: '', access_token: '', refresh_token: '' },
+        },
+      })
+      const profileB = await profileManager.createProfile('second', {
+        idToken: makeJwt({
+          email: 'second@example.com',
+          'https://api.openai.com/auth': { chatgpt_plan_type: 'plus' },
+        }),
+        accessToken: makeJwt({
+          exp: Math.floor((Date.now() + 60 * 60 * 1000) / 1000),
+        }),
+        refreshToken: 'refresh-second',
+        email: 'second@example.com',
+        planType: 'plus',
+        authJson: {
+          tokens: { id_token: '', access_token: '', refresh_token: '' },
+        },
+      })
+
+      await profileManager.setActiveProfileId(profileA.id)
+
+      await vscodeMock.commands.executeCommand(
+        'codex-switch.profile.statusBarAction',
+      )
+      await new Promise((resolve) => setTimeout(resolve, 0))
+
+      assert.equal(await profileManager.getActiveProfileId(), profileB.id)
+      assert.deepEqual(refreshCalls, ['ui', ['quota', profileB.id]])
+      assert.equal(
+        countExecutedCommand(vscodeMock, 'codex-switch.reloadWindow'),
+        1,
+      )
+      assert.equal(vscodeMock.reloadWindowCount, 1)
+    })
+  } finally {
+    if (typeof previousCodexHome === 'undefined') {
+      delete process.env.CODEX_HOME
+    } else {
+      process.env.CODEX_HOME = previousCodexHome
+    }
+  }
+})
+
+test('status bar switch waits for UI refresh before scheduling OpenAI panel reload', async () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'codex-switch-status-bar-refresh-before-reload-'),
+  )
+  const codexHome = path.join(tempDir, 'codex-home')
+  const globalStoragePath = path.join(tempDir, 'storage')
+  fs.mkdirSync(globalStoragePath, { recursive: true })
+
+  const previousCodexHome = process.env.CODEX_HOME
+  process.env.CODEX_HOME = codexHome
+
+  const vscodeMock = createVscodeMock({ openAiExtensionActive: true })
+  const context = {
+    subscriptions: [],
+    globalStorageUri: { fsPath: globalStoragePath },
+    secrets: {
+      values: new Map(),
+      async get(key) {
+        return this.values.get(key)
+      },
+      async store(key, value) {
+        this.values.set(key, value)
+      },
+      async delete(key) {
+        this.values.delete(key)
+      },
+    },
+    globalState: createMemento(),
+    workspaceState: createMemento(),
+  }
+
+  let resolveRefresh
+  const refreshDone = new Promise((resolve) => {
+    resolveRefresh = resolve
+  })
+
+  try {
+    await withMockedVscode(vscodeMock, async () => {
+      const { ProfileManager } = require('../out/auth/profile-manager.js')
+      const { registerCommands } = require('../out/commands/index.js')
+
+      const profileManager = new ProfileManager(context)
+      const refreshCalls = []
+      registerCommands(context, profileManager, {
+        async refreshUi() {
+          refreshCalls.push('ui:start')
+          await refreshDone
+          refreshCalls.push('ui:end')
+        },
+        async refreshAll() {},
+        async refreshQuota(profileId) {
+          refreshCalls.push(['quota', profileId])
+        },
+        async refreshToken() {
+          return true
+        },
+      })
+
+      const profileA = await profileManager.createProfile('first', {
+        idToken: makeJwt({
+          email: 'first@example.com',
+          'https://api.openai.com/auth': { chatgpt_plan_type: 'plus' },
+        }),
+        accessToken: makeJwt({
+          exp: Math.floor((Date.now() + 60 * 60 * 1000) / 1000),
+        }),
+        refreshToken: 'refresh-first',
+        email: 'first@example.com',
+        planType: 'plus',
+        authJson: {
+          tokens: { id_token: '', access_token: '', refresh_token: '' },
+        },
+      })
+      const profileB = await profileManager.createProfile('second', {
+        idToken: makeJwt({
+          email: 'second@example.com',
+          'https://api.openai.com/auth': { chatgpt_plan_type: 'plus' },
+        }),
+        accessToken: makeJwt({
+          exp: Math.floor((Date.now() + 60 * 60 * 1000) / 1000),
+        }),
+        refreshToken: 'refresh-second',
+        email: 'second@example.com',
+        planType: 'plus',
+        authJson: {
+          tokens: { id_token: '', access_token: '', refresh_token: '' },
+        },
+      })
+
+      await profileManager.setActiveProfileId(profileA.id)
+
+      const switchPromise = vscodeMock.commands.executeCommand(
+        'codex-switch.profile.statusBarAction',
+      )
+      await new Promise((resolve) => setImmediate(resolve))
+
+      assert.equal(await profileManager.getActiveProfileId(), profileB.id)
+      assert.deepEqual(refreshCalls, ['ui:start'])
+      assert.equal(
+        countExecutedCommand(vscodeMock, 'codex-switch.reloadWindow'),
+        0,
+      )
+      assert.equal(vscodeMock.reloadWindowCount, 0)
+
+      resolveRefresh()
+      await switchPromise
+      await new Promise((resolve) => setTimeout(resolve, 0))
+
+      assert.deepEqual(refreshCalls, [
+        'ui:start',
+        'ui:end',
+        ['quota', profileB.id],
+      ])
+      assert.equal(
+        countExecutedCommand(vscodeMock, 'codex-switch.reloadWindow'),
+        1,
+      )
+      assert.equal(vscodeMock.reloadWindowCount, 1)
+    })
+  } finally {
+    if (typeof previousCodexHome === 'undefined') {
+      delete process.env.CODEX_HOME
+    } else {
+      process.env.CODEX_HOME = previousCodexHome
+    }
+  }
+})
+
+test('status bar fallback picker preserves status bar reload behavior', async () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'codex-switch-status-bar-picker-reload-'),
+  )
+  const codexHome = path.join(tempDir, 'codex-home')
+  const globalStoragePath = path.join(tempDir, 'storage')
+  fs.mkdirSync(globalStoragePath, { recursive: true })
+
+  const previousCodexHome = process.env.CODEX_HOME
+  process.env.CODEX_HOME = codexHome
+
+  const vscodeOptions = {
+    openAiExtensionActive: true,
+    statusBarClickBehavior: 'toggleLast',
+  }
+  const vscodeMock = createVscodeMock(vscodeOptions)
+  const context = {
+    subscriptions: [],
+    globalStorageUri: { fsPath: globalStoragePath },
+    secrets: {
+      values: new Map(),
+      async get(key) {
+        return this.values.get(key)
+      },
+      async store(key, value) {
+        this.values.set(key, value)
+      },
+      async delete(key) {
+        this.values.delete(key)
+      },
+    },
+    globalState: createMemento(),
+    workspaceState: createMemento(),
+  }
+
+  try {
+    await withMockedVscode(vscodeMock, async () => {
+      const { ProfileManager } = require('../out/auth/profile-manager.js')
+      const { registerCommands } = require('../out/commands/index.js')
+
+      const profileManager = new ProfileManager(context)
+      const refreshCalls = []
+      registerCommands(context, profileManager, {
+        async refreshUi() {
+          refreshCalls.push('ui')
+        },
+        async refreshAll() {},
+        async refreshQuota(profileId) {
+          refreshCalls.push(['quota', profileId])
+        },
+        async refreshToken() {
+          return true
+        },
+      })
+
+      const profileA = await profileManager.createProfile('first', {
+        idToken: makeJwt({
+          email: 'first@example.com',
+          'https://api.openai.com/auth': { chatgpt_plan_type: 'plus' },
+        }),
+        accessToken: makeJwt({
+          exp: Math.floor((Date.now() + 60 * 60 * 1000) / 1000),
+        }),
+        refreshToken: 'refresh-first',
+        email: 'first@example.com',
+        planType: 'plus',
+        authJson: {
+          tokens: { id_token: '', access_token: '', refresh_token: '' },
+        },
+      })
+      const profileB = await profileManager.createProfile('second', {
+        idToken: makeJwt({
+          email: 'second@example.com',
+          'https://api.openai.com/auth': { chatgpt_plan_type: 'plus' },
+        }),
+        accessToken: makeJwt({
+          exp: Math.floor((Date.now() + 60 * 60 * 1000) / 1000),
+        }),
+        refreshToken: 'refresh-second',
+        email: 'second@example.com',
+        planType: 'plus',
+        authJson: {
+          tokens: { id_token: '', access_token: '', refresh_token: '' },
+        },
+      })
+
+      await profileManager.setActiveProfileId(profileA.id)
+      vscodeOptions.showQuickPickResult = {
+        label: 'second',
+        profileId: profileB.id,
+      }
+
+      await vscodeMock.commands.executeCommand(
+        'codex-switch.profile.statusBarAction',
+      )
+      await new Promise((resolve) => setTimeout(resolve, 0))
+
+      assert.equal(await profileManager.getActiveProfileId(), profileB.id)
+      assert.deepEqual(refreshCalls, ['ui', ['quota', profileB.id]])
+      assert.equal(
+        countExecutedCommand(vscodeMock, 'codex-switch.reloadWindow'),
+        1,
+      )
+      assert.equal(vscodeMock.reloadWindowCount, 1)
+    })
+  } finally {
+    if (typeof previousCodexHome === 'undefined') {
+      delete process.env.CODEX_HOME
+    } else {
+      process.env.CODEX_HOME = previousCodexHome
+    }
+  }
+})
+
+test('status bar double-click defers reload until after the click command unwinds', async () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'codex-switch-status-bar-double-click-reload-'),
+  )
+  const codexHome = path.join(tempDir, 'codex-home')
+  const globalStoragePath = path.join(tempDir, 'storage')
+  fs.mkdirSync(globalStoragePath, { recursive: true })
+
+  const previousCodexHome = process.env.CODEX_HOME
+  process.env.CODEX_HOME = codexHome
+
+  const vscodeMock = createVscodeMock({
+    openAiExtensionActive: true,
+    statusBarSwitchTrigger: 'doubleClick',
+    ignoreNestedReloadWindow: true,
+  })
+  const context = {
+    subscriptions: [],
+    globalStorageUri: { fsPath: globalStoragePath },
+    secrets: {
+      values: new Map(),
+      async get(key) {
+        return this.values.get(key)
+      },
+      async store(key, value) {
+        this.values.set(key, value)
+      },
+      async delete(key) {
+        this.values.delete(key)
+      },
+    },
+    globalState: createMemento(),
+    workspaceState: createMemento(),
+  }
+
+  try {
+    await withMockedVscode(vscodeMock, async () => {
+      const { ProfileManager } = require('../out/auth/profile-manager.js')
+      const { registerCommands } = require('../out/commands/index.js')
+
+      const profileManager = new ProfileManager(context)
+      registerCommands(context, profileManager, {
+        async refreshUi() {},
+        async refreshAll() {},
+        async refreshQuota() {},
+        async refreshToken() {
+          return true
+        },
+      })
+
+      const profileA = await profileManager.createProfile('first', {
+        idToken: makeJwt({
+          email: 'first@example.com',
+          'https://api.openai.com/auth': { chatgpt_plan_type: 'plus' },
+        }),
+        accessToken: makeJwt({
+          exp: Math.floor((Date.now() + 60 * 60 * 1000) / 1000),
+        }),
+        refreshToken: 'refresh-first',
+        email: 'first@example.com',
+        planType: 'plus',
+        authJson: {
+          tokens: { id_token: '', access_token: '', refresh_token: '' },
+        },
+      })
+      const profileB = await profileManager.createProfile('second', {
+        idToken: makeJwt({
+          email: 'second@example.com',
+          'https://api.openai.com/auth': { chatgpt_plan_type: 'plus' },
+        }),
+        accessToken: makeJwt({
+          exp: Math.floor((Date.now() + 60 * 60 * 1000) / 1000),
+        }),
+        refreshToken: 'refresh-second',
+        email: 'second@example.com',
+        planType: 'plus',
+        authJson: {
+          tokens: { id_token: '', access_token: '', refresh_token: '' },
+        },
+      })
+
+      await profileManager.setActiveProfileId(profileA.id)
+
+      await vscodeMock.commands.executeCommand(
+        'codex-switch.profile.statusBarAction',
+      )
+      await vscodeMock.commands.executeCommand(
+        'codex-switch.profile.statusBarAction',
+      )
+      await new Promise((resolve) => setTimeout(resolve, 0))
+
+      assert.equal(await profileManager.getActiveProfileId(), profileB.id)
+      assert.equal(
+        countExecutedCommand(vscodeMock, 'codex-switch.reloadWindow'),
+        1,
+      )
+      assert.equal(vscodeMock.reloadWindowCount, 1)
+      assert.equal(vscodeMock.droppedReloadWindowCount, 0)
     })
   } finally {
     if (typeof previousCodexHome === 'undefined') {

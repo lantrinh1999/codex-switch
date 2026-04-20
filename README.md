@@ -45,6 +45,9 @@ Trigger behavior is also configurable:
 After a successful switch,
 Codex Switch writes the chosen auth data into the active auth file,
 so CLI and extension state stay aligned.
+When the official OpenAI Codex panel is active, status bar switches also reload
+the VS Code window so that panel re-reads the switched auth instead of keeping
+its cached account state.
 
 Runtime auth is authoritative.
 If `auth.json` changes outside the extension and no saved profile matches it,

@@ -20,15 +20,22 @@ import {
 
 type StatusBarClickBehavior = 'cycle' | 'toggleLast' | 'bestQuota'
 type StatusBarSwitchTrigger = 'click' | 'doubleClick'
+type ProfileSwitchSource = 'explicit' | 'statusBar'
 
 const STATUS_BAR_DOUBLE_CLICK_WINDOW_MS = 350
+const STATUS_BAR_RELOAD_DELAY_MS = 0
 
 let pendingStatusBarClickAt = 0
 let pendingStatusBarClickTimer: ReturnType<typeof setTimeout> | undefined
+let pendingWindowReloadTimer: ReturnType<typeof setTimeout> | undefined
 
 interface ProfileQuickPickItem extends vscode.QuickPickItem {
   profileId: string
   isInfoItem?: boolean
+}
+
+interface ProfileSwitchOptions {
+  source?: ProfileSwitchSource
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -66,6 +73,13 @@ function resolveRawValue(target: unknown): string | undefined {
   return typeof target.rawValue === 'string' && target.rawValue.trim()
     ? target.rawValue
     : undefined
+}
+
+function resolveProfileSwitchSource(target: unknown): ProfileSwitchSource {
+  if (!isRecord(target)) {
+    return 'explicit'
+  }
+  return target.source === 'statusBar' ? 'statusBar' : 'explicit'
 }
 
 function getDefaultSettingsExportUri(): vscode.Uri {
@@ -121,14 +135,48 @@ function clearPendingStatusBarClick(): void {
   }
 }
 
-async function maybeReloadWindowAfterProfileSwitch(): Promise<void> {
-  const reloadAfterSwitch = vscode.workspace
+function shouldReloadWindowAfterProfileSwitch(): boolean {
+  return vscode.workspace
     .getConfiguration('codexSwitch')
     .get<boolean>('reloadWindowAfterProfileSwitch', false)
-  if (!reloadAfterSwitch) {
+}
+
+function isOpenAiCodexExtensionActive(): boolean {
+  const extension = vscode.extensions.getExtension('openai.chatgpt')
+  return Boolean(extension?.isActive)
+}
+
+function scheduleWindowReload(delayMs = 0): void {
+  if (pendingWindowReloadTimer) {
     return
   }
-  await vscode.commands.executeCommand('workbench.action.reloadWindow')
+
+  pendingWindowReloadTimer = setTimeout(() => {
+    pendingWindowReloadTimer = undefined
+    void vscode.commands.executeCommand('codex-switch.reloadWindow')
+  }, delayMs)
+  pendingWindowReloadTimer.unref?.()
+}
+
+async function maybeReloadWindowAfterProfileSwitch(
+  source: ProfileSwitchSource = 'explicit',
+): Promise<void> {
+  if (shouldReloadWindowAfterProfileSwitch()) {
+    if (source === 'statusBar') {
+      // Status bar clicks can still be mid-dispatch when the second click
+      // resolves. Schedule the reload after this command returns so VS Code
+      // applies it after the status bar command stack unwinds.
+      scheduleWindowReload(STATUS_BAR_RELOAD_DELAY_MS)
+      return
+    }
+    await vscode.commands.executeCommand('workbench.action.reloadWindow')
+    return
+  }
+
+  if (source !== 'statusBar' || !isOpenAiCodexExtensionActive()) {
+    return
+  }
+  scheduleWindowReload(STATUS_BAR_RELOAD_DELAY_MS)
 }
 
 async function getProfileQuickPickItems(
@@ -142,7 +190,9 @@ async function getProfileQuickPickItems(
     detail: [
       (() => {
         const email = getProfileFullEmail(profile)
-        return email && email !== getProfilePrimaryLabel(profile) ? email : undefined
+        return email && email !== getProfilePrimaryLabel(profile)
+          ? email
+          : undefined
       })(),
       runtimeSession.kind === 'matchedProfile' &&
       profile.id === runtimeSession.matchedProfileId
@@ -278,6 +328,7 @@ async function activateProfileById(
   profileManager: ProfileManager,
   refreshCoordinator: RefreshCoordinator,
   profileId: string,
+  options?: ProfileSwitchOptions,
 ): Promise<ProfileSummary | undefined> {
   const profile = await profileManager.getProfile(profileId)
   const ok = await profileManager.setActiveProfileId(profileId)
@@ -287,8 +338,123 @@ async function activateProfileById(
 
   await afterProfileChange(refreshCoordinator, profileId)
   notifyProfileActivated(profile, profileId)
-  await maybeReloadWindowAfterProfileSwitch()
+  await maybeReloadWindowAfterProfileSwitch(options?.source)
   return profile
+}
+
+async function switchProfileFromPicker(
+  profileManager: ProfileManager,
+  refreshCoordinator: RefreshCoordinator,
+  options?: ProfileSwitchOptions,
+): Promise<void> {
+  const items = await getProfileQuickPickItems(profileManager)
+  if (items.length === 0) {
+    await vscode.commands.executeCommand('codex-switch.profile.manage')
+    return
+  }
+
+  const pick = await vscode.window.showQuickPick(items, {
+    placeHolder: vscode.l10n.t('Switch profile'),
+  })
+  if (!pick || pick.isInfoItem) {
+    return
+  }
+
+  await activateProfileById(
+    profileManager,
+    refreshCoordinator,
+    pick.profileId,
+    options,
+  )
+}
+
+async function toggleLastProfile(
+  profileManager: ProfileManager,
+  refreshCoordinator: RefreshCoordinator,
+  options?: ProfileSwitchOptions,
+): Promise<void> {
+  const source = options?.source || 'explicit'
+  const runtimeSession = await getRuntimeSession(profileManager)
+  const runtimeConflictMessage = getRuntimeConflictMessage(runtimeSession)
+  if (runtimeConflictMessage) {
+    void vscode.window.showWarningMessage(runtimeConflictMessage)
+    await switchProfileFromPicker(profileManager, refreshCoordinator, {
+      source,
+    })
+    return
+  }
+
+  const behavior = getStatusBarClickBehavior()
+  if (behavior === 'toggleLast') {
+    const newId = await profileManager.toggleLastProfileId()
+    if (!newId) {
+      await switchProfileFromPicker(profileManager, refreshCoordinator, {
+        source,
+      })
+      return
+    }
+
+    const profile = await profileManager.getProfile(newId)
+    await afterProfileChange(refreshCoordinator, newId)
+    notifyProfileActivated(profile, newId)
+    await maybeReloadWindowAfterProfileSwitch(source)
+    return
+  }
+
+  const profiles = await profileManager.listProfiles()
+  if (profiles.length === 0) {
+    await vscode.commands.executeCommand('codex-switch.profile.manage')
+    return
+  }
+
+  const activeId = await profileManager.getActiveProfileId()
+  if (behavior === 'bestQuota') {
+    await refreshCoordinator.refreshQuota()
+    const bestProfileId = pickBestQuotaProfileId(
+      profiles,
+      refreshCoordinator.getHealthStates(),
+      activeId,
+    )
+
+    if (bestProfileId) {
+      if (bestProfileId === activeId) {
+        const activeProfile = profiles.find(
+          (profile) => profile.id === activeId,
+        )
+        showActionInformationMessage(
+          vscode.l10n.t(
+            'Profile "{0}" already has the best available quota.',
+            getProfileNotificationName(
+              activeProfile,
+              activeId || vscode.l10n.t('current'),
+            ),
+          ),
+        )
+        return
+      }
+
+      await activateProfileById(
+        profileManager,
+        refreshCoordinator,
+        bestProfileId,
+        { source },
+      )
+      return
+    }
+  }
+
+  const currentIndex = profiles.findIndex((profile) => profile.id === activeId)
+  const nextIndex =
+    currentIndex === -1 ? 0 : (currentIndex + 1) % profiles.length
+  const nextProfile = profiles[nextIndex]
+  await activateProfileById(
+    profileManager,
+    refreshCoordinator,
+    nextProfile.id,
+    {
+      source,
+    },
+  )
 }
 
 /**
@@ -342,24 +508,7 @@ export function registerCommands(
   const switchProfileCommand = vscode.commands.registerCommand(
     'codex-switch.profile.switch',
     async () => {
-      const items = await getProfileQuickPickItems(profileManager)
-      if (items.length === 0) {
-        await vscode.commands.executeCommand('codex-switch.profile.manage')
-        return
-      }
-
-      const pick = await vscode.window.showQuickPick(items, {
-        placeHolder: vscode.l10n.t('Switch profile'),
-      })
-      if (!pick || pick.isInfoItem) {
-        return
-      }
-
-      await activateProfileById(
-        profileManager,
-        refreshCoordinator,
-        pick.profileId,
-      )
+      await switchProfileFromPicker(profileManager, refreshCoordinator)
     },
   )
 
@@ -368,7 +517,7 @@ export function registerCommands(
     async (target?: unknown) => {
       const profileId = resolveProfileId(target)
       if (!profileId) {
-        await vscode.commands.executeCommand('codex-switch.profile.switch')
+        await switchProfileFromPicker(profileManager, refreshCoordinator)
         return
       }
 
@@ -378,82 +527,10 @@ export function registerCommands(
 
   const toggleLastProfileCommand = vscode.commands.registerCommand(
     'codex-switch.profile.toggleLast',
-    async () => {
-      const runtimeSession = await getRuntimeSession(profileManager)
-      const runtimeConflictMessage = getRuntimeConflictMessage(runtimeSession)
-      if (runtimeConflictMessage) {
-        void vscode.window.showWarningMessage(runtimeConflictMessage)
-        await vscode.commands.executeCommand('codex-switch.profile.switch')
-        return
-      }
-
-      const behavior = getStatusBarClickBehavior()
-      if (behavior === 'toggleLast') {
-        const newId = await profileManager.toggleLastProfileId()
-        if (!newId) {
-          await vscode.commands.executeCommand('codex-switch.profile.switch')
-          return
-        }
-
-        const profile = await profileManager.getProfile(newId)
-        await afterProfileChange(refreshCoordinator, newId)
-        notifyProfileActivated(profile, newId)
-        await maybeReloadWindowAfterProfileSwitch()
-        return
-      }
-
-      const profiles = await profileManager.listProfiles()
-      if (profiles.length === 0) {
-        await vscode.commands.executeCommand('codex-switch.profile.manage')
-        return
-      }
-
-      const activeId = await profileManager.getActiveProfileId()
-      if (behavior === 'bestQuota') {
-        await refreshCoordinator.refreshQuota()
-        const bestProfileId = pickBestQuotaProfileId(
-          profiles,
-          refreshCoordinator.getHealthStates(),
-          activeId,
-        )
-
-        if (bestProfileId) {
-          if (bestProfileId === activeId) {
-            const activeProfile = profiles.find(
-              (profile) => profile.id === activeId,
-            )
-            showActionInformationMessage(
-              vscode.l10n.t(
-                'Profile "{0}" already has the best available quota.',
-                getProfileNotificationName(
-                  activeProfile,
-                  activeId || vscode.l10n.t('current'),
-                ),
-              ),
-            )
-            return
-          }
-
-          await activateProfileById(
-            profileManager,
-            refreshCoordinator,
-            bestProfileId,
-          )
-          return
-        }
-      }
-
-      const currentIndex = profiles.findIndex(
-        (profile) => profile.id === activeId,
-      )
-      const nextIndex =
-        currentIndex === -1 ? 0 : (currentIndex + 1) % profiles.length
-      const nextProfile = profiles[nextIndex]
-      await activateProfileById(
-        profileManager,
-        refreshCoordinator,
-        nextProfile.id,
-      )
+    async (options?: unknown) => {
+      await toggleLastProfile(profileManager, refreshCoordinator, {
+        source: resolveProfileSwitchSource(options),
+      })
     },
   )
 
@@ -463,7 +540,9 @@ export function registerCommands(
       const trigger = getStatusBarSwitchTrigger()
       if (trigger === 'click') {
         clearPendingStatusBarClick()
-        await vscode.commands.executeCommand('codex-switch.profile.toggleLast')
+        await toggleLastProfile(profileManager, refreshCoordinator, {
+          source: 'statusBar',
+        })
         return
       }
 
@@ -473,7 +552,9 @@ export function registerCommands(
         now - pendingStatusBarClickAt <= STATUS_BAR_DOUBLE_CLICK_WINDOW_MS
       ) {
         clearPendingStatusBarClick()
-        await vscode.commands.executeCommand('codex-switch.profile.toggleLast')
+        await toggleLastProfile(profileManager, refreshCoordinator, {
+          source: 'statusBar',
+        })
         return
       }
 
@@ -974,7 +1055,9 @@ export function registerCommands(
     async () => {
       if (!profileManager.isWorkspaceSpecificCodexHomeConfigured()) {
         void vscode.window.showErrorMessage(
-          vscode.l10n.t('Workspace-specific CODEX_HOME is disabled in settings.'),
+          vscode.l10n.t(
+            'Workspace-specific CODEX_HOME is disabled in settings.',
+          ),
         )
         return
       }
@@ -999,25 +1082,27 @@ export function registerCommands(
     },
   )
 
-  const enableWorkspaceSpecificCodexHomeCommand = vscode.commands.registerCommand(
-    'codex-switch.profile.enableWorkspaceSpecificCodexHome',
-    async () => {
-      await updateWorkspaceSpecificCodexHomeSetting(true)
-      showActionInformationMessage(
-        vscode.l10n.t('Enabled workspace-specific CODEX_HOME.'),
-      )
-    },
-  )
+  const enableWorkspaceSpecificCodexHomeCommand =
+    vscode.commands.registerCommand(
+      'codex-switch.profile.enableWorkspaceSpecificCodexHome',
+      async () => {
+        await updateWorkspaceSpecificCodexHomeSetting(true)
+        showActionInformationMessage(
+          vscode.l10n.t('Enabled workspace-specific CODEX_HOME.'),
+        )
+      },
+    )
 
-  const disableWorkspaceSpecificCodexHomeCommand = vscode.commands.registerCommand(
-    'codex-switch.profile.disableWorkspaceSpecificCodexHome',
-    async () => {
-      await updateWorkspaceSpecificCodexHomeSetting(false)
-      showActionInformationMessage(
-        vscode.l10n.t('Disabled workspace-specific CODEX_HOME.'),
-      )
-    },
-  )
+  const disableWorkspaceSpecificCodexHomeCommand =
+    vscode.commands.registerCommand(
+      'codex-switch.profile.disableWorkspaceSpecificCodexHome',
+      async () => {
+        await updateWorkspaceSpecificCodexHomeSetting(false)
+        showActionInformationMessage(
+          vscode.l10n.t('Disabled workspace-specific CODEX_HOME.'),
+        )
+      },
+    )
 
   const reloadWindowCommand = vscode.commands.registerCommand(
     'codex-switch.reloadWindow',

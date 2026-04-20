@@ -39,6 +39,13 @@ const ACTIVE_PROFILE_KEY = 'codexSwitch.activeProfileId'
 const LAST_PROFILE_KEY = 'codexSwitch.lastProfileId'
 const MIGRATED_LEGACY_KEY = 'codexSwitch.migratedLegacyProfiles'
 const PROFILE_RENEW_LEASE_TTL_MS = 5 * 60 * 1000
+const WORKSPACE_SHARED_CODEX_HOME_ENTRIES = [
+  'agents',
+  'prompts',
+  'rules',
+  'skills',
+  'config.toml',
+] as const
 
 // Backward compatibility keys (pre-rename).
 const OLD_ACTIVE_PROFILE_KEY = 'codexUsage.activeProfileId'
@@ -392,6 +399,55 @@ export class ProfileManager {
     return getDefaultCodexAuthPath()
   }
 
+  private getSharedCodexHomeSeedPath(): string {
+    return path.join(os.homedir(), '.codex')
+  }
+
+  private pathExists(entryPath: string): boolean {
+    try {
+      fs.lstatSync(entryPath)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  private removeExistingPath(entryPath: string): void {
+    const stats = fs.lstatSync(entryPath)
+    if (stats.isDirectory() && !stats.isSymbolicLink()) {
+      fs.rmSync(entryPath, { recursive: true, force: true })
+      return
+    }
+    fs.rmSync(entryPath, { force: true })
+  }
+
+  private seedWorkspaceCodexHomeSharedEntries(wsHome: string): void {
+    fs.mkdirSync(wsHome, { recursive: true })
+
+    const sharedCodexHome = this.getSharedCodexHomeSeedPath()
+    for (const entryName of WORKSPACE_SHARED_CODEX_HOME_ENTRIES) {
+      const sourcePath = path.join(sharedCodexHome, entryName)
+      if (!this.pathExists(sourcePath)) {
+        continue
+      }
+
+      try {
+        const targetPath = path.join(wsHome, entryName)
+        if (this.pathExists(targetPath)) {
+          this.removeExistingPath(targetPath)
+        }
+
+        const linkType = fs.statSync(sourcePath).isDirectory()
+          ? 'junction'
+          : 'file'
+        fs.symlinkSync(sourcePath, targetPath, linkType)
+      } catch {
+        // Non-fatal: keep workspace activation working even if a shared asset
+        // cannot be linked into the isolated CODEX_HOME.
+      }
+    }
+  }
+
   async initWorkspaceAuth(sourceAuthPath?: string): Promise<void> {
     if (this.isRemoteFilesMode()) {
       return
@@ -400,6 +456,7 @@ export class ProfileManager {
     if (!wsHome) {
       return
     }
+    this.seedWorkspaceCodexHomeSharedEntries(wsHome)
     const wsAuthPath = path.join(wsHome, 'auth.json')
     if (fs.existsSync(wsAuthPath)) {
       return

@@ -293,8 +293,15 @@ function createVscodeMock(options = {}) {
         return callback(...args)
       },
     },
+    extensions: {
+      getExtension() {
+        return undefined
+      },
+    },
   }
 
+  vscodeMock.registeredCommands = registeredCommands
+  vscodeMock.configurationValues = configurationValues
   vscodeMock.fireConfigurationChange = (...keys) => {
     const changed = new Set(keys)
     for (const listener of configurationListeners) {
@@ -312,7 +319,6 @@ function createVscodeMock(options = {}) {
     }
   }
 
-  vscodeMock.configurationValues = configurationValues
   return vscodeMock
 }
 
@@ -336,6 +342,23 @@ async function withMockedVscode(vscodeMock, fn) {
   } finally {
     Module._load = originalLoad
   }
+}
+
+function createSharedCodexEntry(root, entryName) {
+  const entryPath = path.join(root, entryName)
+  if (entryName === 'config.toml') {
+    fs.writeFileSync(entryPath, 'default_model = "gpt-5"\n', 'utf8')
+    return
+  }
+
+  fs.mkdirSync(entryPath, { recursive: true })
+  fs.writeFileSync(path.join(entryPath, 'seed.txt'), entryName, 'utf8')
+}
+
+function assertSymlinkTarget(targetPath, sourcePath) {
+  const stats = fs.lstatSync(targetPath)
+  assert.equal(stats.isSymbolicLink(), true)
+  assert.equal(fs.realpathSync(targetPath), fs.realpathSync(sourcePath))
 }
 
 test('extension activation adopts the workspace CODEX_HOME inside the extension host', async () => {
@@ -372,6 +395,138 @@ test('extension activation adopts the workspace CODEX_HOME inside the extension 
       assert.equal(replacements.get('CODEX_HOME'), expectedCodexHome)
     })
   } finally {
+    if (typeof previousCodexHome === 'undefined') {
+      delete process.env.CODEX_HOME
+    } else {
+      process.env.CODEX_HOME = previousCodexHome
+    }
+  }
+})
+
+test('workspace-specific CODEX_HOME symlinks shared ~/.codex entries on activation', async () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'codex-switch-extension-shared-symlinks-'),
+  )
+  const tempHome = path.join(tempDir, 'home')
+  const workspaceStoragePath = path.join(tempDir, 'workspace-storage')
+  const globalStoragePath = path.join(tempDir, 'storage')
+  const globalCodexHome = path.join(tempHome, '.codex')
+  const entryNames = ['agents', 'prompts', 'rules', 'skills', 'config.toml']
+  const originalHomedir = os.homedir
+
+  fs.mkdirSync(globalStoragePath, { recursive: true })
+  fs.mkdirSync(workspaceStoragePath, { recursive: true })
+  fs.mkdirSync(tempHome, { recursive: true })
+  fs.mkdirSync(globalCodexHome, { recursive: true })
+  for (const entryName of entryNames) {
+    createSharedCodexEntry(globalCodexHome, entryName)
+  }
+
+  const previousCodexHome = process.env.CODEX_HOME
+  process.env.CODEX_HOME = path.join(tempDir, 'alternate-codex-home')
+  os.homedir = () => tempHome
+
+  try {
+    await withMockedVscode(createVscodeMock(), async () => {
+      const extension = require('../out/extension.js')
+      const context = createExtensionContext(globalStoragePath, {
+        storagePath: workspaceStoragePath,
+      })
+
+      extension.activate(context)
+      await new Promise((resolve) => setImmediate(resolve))
+
+      const workspaceCodexHome = path.join(workspaceStoragePath, '.codex')
+      for (const entryName of entryNames) {
+        assertSymlinkTarget(
+          path.join(workspaceCodexHome, entryName),
+          path.join(globalCodexHome, entryName),
+        )
+      }
+    })
+  } finally {
+    os.homedir = originalHomedir
+    if (typeof previousCodexHome === 'undefined') {
+      delete process.env.CODEX_HOME
+    } else {
+      process.env.CODEX_HOME = previousCodexHome
+    }
+  }
+})
+
+test('workspace-specific CODEX_HOME replaces existing paths with shared symlinks', async () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'codex-switch-extension-replace-shared-paths-'),
+  )
+  const tempHome = path.join(tempDir, 'home')
+  const workspaceStoragePath = path.join(tempDir, 'workspace-storage')
+  const globalStoragePath = path.join(tempDir, 'storage')
+  const workspaceCodexHome = path.join(workspaceStoragePath, '.codex')
+  const globalCodexHome = path.join(tempHome, '.codex')
+  const originalHomedir = os.homedir
+
+  fs.mkdirSync(globalStoragePath, { recursive: true })
+  fs.mkdirSync(workspaceCodexHome, { recursive: true })
+  fs.mkdirSync(tempHome, { recursive: true })
+  fs.mkdirSync(globalCodexHome, { recursive: true })
+
+  createSharedCodexEntry(globalCodexHome, 'agents')
+  createSharedCodexEntry(globalCodexHome, 'prompts')
+  createSharedCodexEntry(globalCodexHome, 'rules')
+  createSharedCodexEntry(globalCodexHome, 'skills')
+  createSharedCodexEntry(globalCodexHome, 'config.toml')
+
+  fs.writeFileSync(path.join(workspaceCodexHome, 'config.toml'), 'stale = true\n')
+  fs.mkdirSync(path.join(workspaceCodexHome, 'agents'), { recursive: true })
+  fs.writeFileSync(
+    path.join(workspaceCodexHome, 'agents', 'old.txt'),
+    'workspace-only',
+    'utf8',
+  )
+  fs.mkdirSync(path.join(workspaceCodexHome, 'prompts'), { recursive: true })
+  fs.writeFileSync(
+    path.join(workspaceCodexHome, 'prompts', 'old.txt'),
+    'workspace-only',
+    'utf8',
+  )
+
+  const previousCodexHome = process.env.CODEX_HOME
+  process.env.CODEX_HOME = path.join(tempDir, 'alternate-codex-home')
+  os.homedir = () => tempHome
+
+  try {
+    await withMockedVscode(createVscodeMock(), async () => {
+      const extension = require('../out/extension.js')
+      const context = createExtensionContext(globalStoragePath, {
+        storagePath: workspaceStoragePath,
+      })
+
+      extension.activate(context)
+      await new Promise((resolve) => setImmediate(resolve))
+
+      assertSymlinkTarget(
+        path.join(workspaceCodexHome, 'agents'),
+        path.join(globalCodexHome, 'agents'),
+      )
+      assertSymlinkTarget(
+        path.join(workspaceCodexHome, 'prompts'),
+        path.join(globalCodexHome, 'prompts'),
+      )
+      assertSymlinkTarget(
+        path.join(workspaceCodexHome, 'rules'),
+        path.join(globalCodexHome, 'rules'),
+      )
+      assertSymlinkTarget(
+        path.join(workspaceCodexHome, 'skills'),
+        path.join(globalCodexHome, 'skills'),
+      )
+      assertSymlinkTarget(
+        path.join(workspaceCodexHome, 'config.toml'),
+        path.join(globalCodexHome, 'config.toml'),
+      )
+    })
+  } finally {
+    os.homedir = originalHomedir
     if (typeof previousCodexHome === 'undefined') {
       delete process.env.CODEX_HOME
     } else {
