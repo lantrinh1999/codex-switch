@@ -18,6 +18,30 @@ test('extension activates eagerly to claim workspace CODEX_HOME before other con
   ])
 })
 
+test('vsce scripts explicitly allow intentional star activation', () => {
+  // The extension relies on eager activation so workspace-scoped CODEX_HOME is
+  // visible before other consumers initialize. Keep packaging non-interactive
+  // by declaring that startup cost explicitly in the vsce scripts.
+  assert.match(
+    manifest.scripts['vscode:package'],
+    /--allow-star-activation(?:\s|$)/,
+  )
+  assert.match(
+    manifest.scripts['vscode:publish'],
+    /--allow-star-activation(?:\s|$)/,
+  )
+})
+
+test('vsce packaging scripts compile inline instead of using vscode:prepublish', () => {
+  // Node 24 warns when vsce spawns `npm run vscode:prepublish` with `shell:
+  // true` and argument arrays. Keep the build step, but run it directly from
+  // the public package/publish scripts so packaging stays quiet on supported
+  // runtimes.
+  assert.equal(manifest.scripts['vscode:prepublish'], undefined)
+  assert.match(manifest.scripts['vscode:package'], /^npm run compile && /)
+  assert.match(manifest.scripts['vscode:publish'], /^npm run compile && /)
+})
+
 test('profiles sidebar view container is contributed', () => {
   const activitybar = manifest.contributes.viewsContainers.activitybar
   assert.deepEqual(activitybar, [

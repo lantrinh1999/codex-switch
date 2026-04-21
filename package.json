@@ -21,8 +21,7 @@
     "package.nls*.json"
   ],
   "scripts": {
-    "vscode:prepublish": "npm run compile",
-    "vscode:publish": "vsce publish",
+    "vscode:publish": "npm run compile && vsce publish --allow-star-activation",
     "openvsx:publish": "npx ovsx publish",
     "compile": "tsc -p ./",
     "test": "npm run compile && node --test test/*.test.js",
@@ -31,7 +30,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "npm run lint:ts && npm run lint:md && npm run format:check",
-    "vscode:package": "vsce package",
+    "vscode:package": "npm run compile && vsce package --allow-star-activation",
     "watch": "tsc -watch -p ./"
   },
   "engines": {
